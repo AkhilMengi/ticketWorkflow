@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+requests
+openai>=1.0.0
+langgraph
+sqlalchemy
+tenacity
+sse-starlette
