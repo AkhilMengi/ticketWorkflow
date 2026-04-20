@@ -1,0 +1,49 @@
+[
+  {
+    "id": "req_001",
+    "user_id": "cust_001",
+    "issue_type": "billing_issue",
+    "message": "I was charged $150 twice for my subscription",
+    "backend_context": {
+      "amount": 150
+    },
+    "category": "billing"
+  },
+  {
+    "id": "req_002",
+    "user_id": "cust_002",
+    "issue_type": "technical_support",
+    "message": "I'm getting a 403 error when accessing the dashboard",
+    "backend_context": {
+      "error_code": 403
+    },
+    "category": "technical"
+  },
+  {
+    "id": "req_003",
+    "user_id": "cust_003",
+    "issue_type": "billing_issue",
+    "message": "Why was I charged for 2 months when I only used the service for 1?",
+    "backend_context": {
+      "months_used": 1,
+      "months_charged": 2
+    },
+    "category": "billing"
+  },
+  {
+    "id": "req_004",
+    "user_id": "cust_004",
+    "issue_type": "general",
+    "message": "I have a question about my account",
+    "backend_context": {},
+    "category": null
+  },
+  {
+    "id": "req_005",
+    "user_id": "cust_005",
+    "issue_type": "feature_request",
+    "message": "Can you add PDF export for reports?",
+    "backend_context": {},
+    "category": "feature_request"
+  }
+]

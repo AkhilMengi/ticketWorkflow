@@ -1,0 +1,52 @@
+[
+  {
+    "id": "req_001",
+    "user_id": "cust_12345",
+    "issue_type": "billing_issue",
+    "message": "I was charged $150 twice for my monthly subscription. Please refund the duplicate charge.",
+    "backend_context": {
+      "amount": 150,
+      "subscription_id": "sub_abc123"
+    },
+    "category": "billing"
+  },
+  {
+    "id": "req_002",
+    "user_id": "cust_67890",
+    "issue_type": "technical_support",
+    "message": "I'm getting a 403 Forbidden error when trying to access the dashboard. This started today.",
+    "backend_context": {
+      "error_code": 403,
+      "endpoint": "/api/dashboard"
+    },
+    "category": "technical"
+  },
+  {
+    "id": "req_003",
+    "user_id": "cust_11111",
+    "issue_type": "billing_issue",
+    "message": "I received an invoice for 2 months but I only used the service for 1 month. Can you check this?",
+    "backend_context": {
+      "invoice_number": "INV-2024-001",
+      "months_used": 1,
+      "months_charged": 2
+    },
+    "category": "billing"
+  },
+  {
+    "id": "req_004",
+    "user_id": "cust_22222",
+    "issue_type": "general",
+    "message": "I would like to request a new feature for exporting reports to PDF format",
+    "backend_context": {},
+    "category": "feature_request"
+  },
+  {
+    "id": "req_005",
+    "user_id": "cust_33333",
+    "issue_type": "general",
+    "message": "I need help with something about my account but I'm not sure what to categorize it under",
+    "backend_context": {},
+    "category": null
+  }
+]
