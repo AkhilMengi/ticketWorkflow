@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic>=2.0
+python-dotenv
+requests
+openai>=1.0.0
+langgraph
+sqlalchemy
+tenacity
+sse-starlette
+PyJWT>=2.8.0
+python-multipart>=0.0.5
