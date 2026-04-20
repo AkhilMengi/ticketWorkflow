@@ -100,3 +100,29 @@ class UpdateContractResponse(BaseModel):
     success: bool
     contract_id: str
     message: str
+
+
+# Recommended Actions schemas
+class RecommendedAction(BaseModel):
+    action_type: str  # "salesforce_case", "billing", or "human_in_loop"
+    description: str
+    parameters: Dict[str, Any]
+
+class ActionResult(BaseModel):
+    action_type: str
+    status: str  # "success", "failed", "pending_human_review"
+    result: Dict[str, Any]
+    error: Optional[str] = None
+
+class ProcessRecommendedActionsResponse(BaseModel):
+    job_id: str
+    user_id: str
+    total_actions: int
+    results: List[ActionResult]
+    summary: Dict[str, Any]
+
+# Intelligent Actions Endpoint Schema
+class ExecuteIntelligentActionsRequest(BaseModel):
+    user_id: str
+    issue_description: str  # Description of the issue
+    priority: Optional[str] = None  # Optional: low, medium, high, critical

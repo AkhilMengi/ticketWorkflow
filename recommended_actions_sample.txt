@@ -1,0 +1,21 @@
+salesforce_case:
+  description: Create support case for payment processing failure
+  parameters:
+    issue_type: Payment Processing
+    priority: High
+    category: Billing
+    summary: "Urgent: Payment processing failed multiple times"
+
+billing:
+  description: Apply service credit for failed transaction attempts
+  parameters:
+    action: apply_credit
+    amount: 50
+    reason: Failed payment processing - automatic retry
+
+human_in_loop:
+  description: Escalate to premium support team for account review
+  parameters:
+    team: Premium Support
+    priority: urgent
+    reason: Customer experiencing recurring payment issues - requires manual investigation

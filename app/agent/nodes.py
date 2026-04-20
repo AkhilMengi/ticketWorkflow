@@ -11,14 +11,35 @@ def decision_node(state):
     # Check for existing cases
     existing_cases = lookup_existing_case(state["user_id"], state["issue_type"])
     
+    # ⚠️ PREVENT INFINITE LOOPS: If both profile and logs exist, move to create_case
+    has_profile = state["customer_profile"] is not None
+    has_logs = state["logs"] is not None
+    has_classification = state["summary"] is not None
+    retries = state.get("retries", 0)
+    
+    # If we have all necessary data and have retried too many times, force create_case
+    if has_profile and has_logs and retries > 3:
+        print(f"[LOOP PREVENTION] Forcing create_case after {retries} retries")
+        return {
+            "next_action": "create_case",
+            "retries": retries + 1,
+            "event_log": state["event_log"] + [{
+                "type": "decision",
+                "thought": "Loop prevention: Have all data, forcing create_case",
+                "action": "create_case",
+                "confidence": 0.95,
+                "rationale": "Prevention of infinite fetch_logs loop - all required data available"
+            }]
+        }
+    
     # Format prompt with actual context
     prompt_context = DECISION_PROMPT.format(
         user_id=state["user_id"],
         issue_type=state["issue_type"],
         message=state.get("message", "")[:200],
-        has_profile=state["customer_profile"] is not None,
-        has_logs=state["logs"] is not None,
-        has_classification=state["summary"] is not None,
+        has_profile=has_profile,
+        has_logs=has_logs,
+        has_classification=has_classification,
         existing_cases_count=existing_cases.get("case_count", 0)
     )
     
@@ -35,6 +56,7 @@ def decision_node(state):
 
     return {
         "next_action": parsed["action"],
+        "retries": retries + 1,
         "event_log": state["event_log"] + [{
             "type": "decision",
             "thought": parsed.get("thought", ""),

@@ -78,6 +78,17 @@ class EnhancedAgentState(TypedDict):
     billing_action_taken: Optional[str]
     billing_error: Optional[str]
     
+    # ==================== INTELLIGENT ACTIONS ====================
+    # Fields for AI-powered action selection and execution
+    issue_severity: Optional[str]  # "low", "medium", "high", "critical"
+    ai_analysis: Optional[str]  # LLM analysis of the issue
+    recommended_actions: Optional[List[Dict[str, Any]]]  # Actions recommended by AI
+    action_decisions: Optional[Dict[str, bool]]  # Action type -> should execute decision
+    intelligent_action_results: Optional[List[Dict[str, Any]]]  # Execution results
+    intelligent_status: Optional[str]  # Status of intelligent action execution
+    routing_type: Optional[Literal["traditional", "intelligent_actions"]]  # Which path was taken
+    execution_summary: Optional[Dict[str, Any]]  # Summary stats (total, successful, failed)
+    
     # ==================== AGGREGATION ====================
     execution_system: Optional[Literal["salesforce", "billing"]]
     aggregated_response: Optional[Dict[str, Any]]
@@ -130,6 +141,16 @@ def create_enhanced_state(base_state: Dict[str, Any]) -> EnhancedAgentState:
         "billing_status": None,
         "billing_action_taken": None,
         "billing_error": None,
+        
+        # Intelligent actions fields
+        "issue_severity": None,
+        "ai_analysis": None,
+        "recommended_actions": None,
+        "action_decisions": None,
+        "intelligent_action_results": None,
+        "intelligent_status": None,
+        "routing_type": None,
+        "execution_summary": None,
         
         # Aggregation
         "execution_system": None,

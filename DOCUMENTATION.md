@@ -1364,3 +1364,23 @@ This comprehensive documentation covers:
 ✅ **API Payloads** - Real examples for testing
 
 All documentation is now consolidated into this single file for easier reference and maintenance. Each section provides detailed context, code examples, and practical implementation guidance.
+
+
+AgentExecutor	LangGraph StateGraph + invoke()
+Memory	memory.py + database
+Chains	Graph nodes (nodes.py, contract_nodes.py)
+Tools	tools.py, contract_tools.py
+Direct LLM calls	OpenAI client in routing logic & nodes
+The system uses OpenAI directly for LLM calls (see requirements.txt: openai>=1.0.0) rather than LangChain's abstraction layer.
+
+Issue Description 
+      ↓
+routing_node (classify + understand severity)
+      ↓
+Read recommended_actions_sample.txt
+      ↓
+AI decides which actions fit this issue
+      ↓
+Execute via adapters (SF adapter, Billing adapter)
+      ↓
+Return results

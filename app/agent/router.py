@@ -238,7 +238,7 @@ Respond with ONLY valid JSON, no markdown:
             return {
                 "target_system": system,
                 "confidence": 0.95,
-                "rationale": f"Determined by issue type: {state.get('issue_type')}",
+                "rationale": f"Determined by issue type: {state.get('issue_type', 'general')}",
                 "metadata": {**metadata, "classification_method": "issue_type_mapping"}
             }
         
@@ -254,8 +254,15 @@ Respond with ONLY valid JSON, no markdown:
             }
         
         # Priority 3: Keyword Analysis
+        message = (state.get("message") or "")
+        category = (state.get("category") or "")
+        if not isinstance(message, str):
+            message = str(message) if message else ""
+        if not isinstance(category, str):
+            category = str(category) if category else ""
+        
         sf_score, billing_score = self.score_keywords(
-            state.get("message", "") + " " + state.get("category", "")
+            message + " " + category
         )
         
         metadata["scores"] = {"sf_score": sf_score, "billing_score": billing_score}

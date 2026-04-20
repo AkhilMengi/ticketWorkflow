@@ -3,13 +3,20 @@ from app.api.schemas import (
     CreateJobRequest, CreateJobResponse, JobStatusResponse, EventsResponse,
     UpdateCaseRequest, UpdateCaseResponse, AddCommentRequest, AddCommentResponse,
     CloseCaseRequest, CloseCaseResponse, LookupCasesRequest, LookupCasesResponse,
-    CreateContractRequest, CreateContractResponse, ContractStatusResponse, UpdateContractRequest, UpdateContractResponse
+    CreateContractRequest, CreateContractResponse, ContractStatusResponse, UpdateContractRequest, UpdateContractResponse,
+    ProcessRecommendedActionsResponse, ExecuteIntelligentActionsRequest
 )
 from app.services.job_service import create_job, get_job, get_events
+from app.services.intelligent_action_service import execute_intelligent_recommended_actions
 from app.workers.worker import enqueue_job, enqueue_contract_job
 from app.agent.memory import get_long_term_memory
+from app.agent.routing_graph import routing_graph
+from app.agent.routing_state import create_enhanced_state
 from app.integrations.salesforce import SalesforceClient
+import uuid
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/jobs", response_model=CreateJobResponse)
@@ -229,3 +236,123 @@ def update_contract(contract_id: str, payload: UpdateContractRequest):
             raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found in Salesforce")
         else:
             raise HTTPException(status_code=500, detail=f"Failed to update contract: {error_msg}")
+
+
+@router.post("/intelligent-actions", response_model=ProcessRecommendedActionsResponse)
+def execute_intelligent_actions(payload: ExecuteIntelligentActionsRequest):
+    """
+    🤖 AI-POWERED ENDPOINT (LangGraph Integrated)
+    
+    This endpoint uses the routing graph to intelligently analyze issues and decide actions.
+    
+    The routing graph automatically:
+    1. Checks if intelligent routing is appropriate (file exists + description present)
+    2. Routes through intelligent_action_routing_node for AI analysis
+    3. Executes recommended actions via intelligent_actions_execution_node
+    4. Aggregates results with intelligent response formatting
+    
+    Workflow:
+    1. Receive issue description
+    2. Graph routes to intelligent routing
+    3. AI analyzes severity and type
+    4. AI recommends appropriate actions
+    5. Execute only recommended actions
+    6. Return results with AI analysis
+    
+    Request body:
+    {
+      "user_id": "customer_123",
+      "issue_description": "Customer's payment keeps failing, tried 3 times"
+    }
+    """
+    try:
+        job_id = str(uuid.uuid4())
+        
+        logger.info(f"[INTELLIGENT_ACTIONS] Starting for user {payload.user_id}")
+        
+        # Create enhanced agent state with all required fields
+        initial_state = create_enhanced_state({
+            "job_id": job_id,
+            "user_id": payload.user_id,
+            "issue_type": "customer_support",
+            "message": payload.issue_description,
+            "backend_context": {
+                "source": "intelligent_actions_api",
+                "request_type": "ai_powered_routing"
+            },
+            "customer_profile": None,
+            "logs": None,
+            "summary": None,
+            "category": None,
+            "priority": None,
+            "next_action": "routing",  # Skip enrichment, go straight to routing
+            "final_answer": None,
+            "case_id": None,
+            "retries": 0,
+            "event_log": []
+        })
+        
+        logger.info(f"[INTELLIGENT_ACTIONS] Initial state created with keys: {list(initial_state.keys())}")
+        
+        # Invoke the LangGraph routing graph
+        logger.info(f"[INTELLIGENT_ACTIONS] Invoking routing graph...")
+        result = routing_graph.invoke(initial_state)
+        
+        logger.info(f"[INTELLIGENT_ACTIONS] Graph result keys: {list(result.keys())}")
+        
+        # Extract aggregated response from graph result
+        aggregated_response = result.get("aggregated_response", {})
+        execution_summary = result.get("execution_summary", {})
+        intelligent_results = result.get("intelligent_action_results", [])
+        
+        logger.info(f"[INTELLIGENT_ACTIONS] Response summary: {execution_summary}")
+        
+        # Transform intelligent_results to ActionResult format
+        action_results = []
+        for action_result in intelligent_results:
+            action_type = action_result.get("action_type", "unknown")
+            status = action_result.get("status", "unknown")
+            details = action_result.get("details", {})
+            error = action_result.get("error")
+            
+            # Ensure result field has content
+            result_data = details if details else {"status": status}
+            if "action_type" not in result_data:
+                result_data["action_type"] = action_type
+            
+            action_results.append({
+                "action_type": action_type,
+                "status": status,
+                "result": result_data,
+                "error": error
+            })
+        
+        # Build API response
+        response_data = {
+            "job_id": job_id,
+            "user_id": payload.user_id,
+            "total_actions": execution_summary.get("total_actions", len(action_results)),
+            "results": action_results,
+            "summary": execution_summary
+        }
+        
+        logger.info(f"[INTELLIGENT_ACTIONS] Returning response with {len(action_results)} actions")
+        return ProcessRecommendedActionsResponse(**response_data)
+        
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"recommended_actions_sample.txt not found: {str(e)}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
+    except TypeError as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"TypeError in intelligent actions: {tb}")
+        raise HTTPException(status_code=500, detail=f"TypeError: {str(e)}")
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Full exception in intelligent actions: {tb}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to execute intelligent actions: {str(e)}"
+        )

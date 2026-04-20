@@ -23,6 +23,8 @@ from app.agent.routing_nodes import (
     routing_node,
     sf_execution_node,
     billing_execution_node,
+    intelligent_action_routing_node,
+    intelligent_actions_execution_node,
     aggregation_node,
     manual_review_node
 )
@@ -73,7 +75,15 @@ def build_routing_graph():
     
     # ==================== ROUTING PHASE ====================
     # New routing nodes - intelligent decision making
+    # Traditional routing for SF vs Billing classification
     builder.add_node("routing", routing_node)
+    
+    # ⭐ NEW: Intelligent action routing node
+    def intelligent_routing_wrapper(state):
+        """Wrapper to invoke intelligent action routing node"""
+        return intelligent_action_routing_node(state)
+    
+    builder.add_node("intelligent_routing", intelligent_routing_wrapper)
     
     # ==================== EXECUTION PHASE ====================
     # System-specific execution
@@ -84,6 +94,13 @@ def build_routing_graph():
     def billing_exec_wrapper(state):
         """Wrapper to pass adapter to Billing execution node"""
         return billing_execution_node(state, billing_adapter)
+    
+    # ⭐ NEW: Intelligent actions execution node
+    def intelligent_exec_wrapper(state):
+        """Wrapper to pass adapters to intelligent actions execution node"""
+        return intelligent_actions_execution_node(state, sf_adapter, billing_adapter)
+    
+    builder.add_node("intelligent_execution", intelligent_exec_wrapper)
     
     builder.add_node("sf_execution", sf_exec_wrapper)
     builder.add_node("billing_execution", billing_exec_wrapper)
@@ -129,6 +146,27 @@ def build_routing_graph():
     # ==================== ROUTING EDGES ====================
     # After enrichment, route based on system classification
     def route_by_system(state):
+        import os
+        
+        # Check if recommended actions file exists (trigger for intelligent routing)
+        # Use absolute path resolution to ensure it works from any working directory
+        try:
+            current_file = os.path.abspath(__file__)
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+            file_path = os.path.join(project_root, "recommended_actions_sample.txt")
+            actions_file_exists = os.path.exists(file_path)
+        except Exception:
+            actions_file_exists = False
+        
+        issue_description = state.get("message", "")
+        
+        # Decision logic: use intelligent routing if:
+        # 1. Recommended actions file exists, AND
+        # 2. We have an issue description to analyze
+        if actions_file_exists and issue_description:
+            return "intelligent_routing"
+        
+        # Otherwise, use traditional routing
         target_system = state.get("target_system")
         needs_review = state.get("needs_manual_review", False)
         
@@ -145,6 +183,7 @@ def build_routing_graph():
         "routing",
         route_by_system,
         {
+            "intelligent_routing": "intelligent_routing",
             "sf_execution": "sf_execution",
             "billing_execution": "billing_execution",
             "manual_review": "manual_review"
@@ -152,9 +191,13 @@ def build_routing_graph():
     )
     
     # ==================== EXECUTION TO AGGREGATION ====================
+    # ⭐ NEW: Intelligent routing execution path
+    builder.add_edge("intelligent_routing", "intelligent_execution")
+    
     # All execution paths lead to aggregation
     builder.add_edge("sf_execution", "aggregation")
     builder.add_edge("billing_execution", "aggregation")
+    builder.add_edge("intelligent_execution", "aggregation")
     builder.add_edge("manual_review", "aggregation")
     
     # ==================== FINAL EDGE ====================
