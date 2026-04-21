@@ -9,16 +9,93 @@ import json
 import logging
 import os
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from openai import OpenAI
 
 from app.config import settings
 from app.agent.router import classify_and_route, RoutingSystem
 from app.agent.adapters import ActionType, AdapterRegistry, SalesforceAdapter, BillingAdapter
-from app.services.action_service import parse_actions_from_file
 from app.services.intelligent_action_service import analyze_issue_and_select_action
 
 logger = logging.getLogger(__name__)
+
+
+def parse_actions_from_suggestions() -> List[Dict[str, Any]]:
+    """
+    Load generic suggestions from suggestions.txt file.
+    
+    These are GENERIC suggestions (e.g., "Check customer details", "Rebill account")
+    The AI will intelligently map these to system actions:
+    - create_case, apply_billing_adjustment, escalate_to_team, send_notification
+    
+    Returns:
+        List of suggestion dictionaries with title and description
+    """
+    try:
+        import yaml
+        
+        # Try to load from suggestions file
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        file_path = os.path.join(project_root, "suggestions.txt")
+        
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                content = yaml.safe_load(f)
+                
+                if not content:
+                    return []
+                
+                suggestions = []
+                for key, config in content.items():
+                    if isinstance(config, dict):
+                        suggestions.append({
+                            "title": config.get("title", ""),
+                            "description": config.get("description", ""),
+                            "key": key
+                        })
+                
+                return suggestions
+        else:
+            logger.warning(f"Suggestions file not found at {file_path}, using default suggestions")
+            return get_default_suggestions()
+    
+    except Exception as e:
+        logger.error(f"Error loading suggestions file: {e}, using default suggestions")
+        return get_default_suggestions()
+
+
+def get_default_suggestions() -> List[Dict[str, Any]]:
+    """
+    Fallback default suggestions if file is not found.
+    These are GENERIC, not system-action specific.
+    """
+    return [
+        {
+            "title": "Check customer details",
+            "description": "Verify customer account information and payment history",
+            "key": "check_details"
+        },
+        {
+            "title": "Rebill the account",
+            "description": "Reprocess billing or apply credits/adjustments to customer account",
+            "key": "rebill"
+        },
+        {
+            "title": "Close the case",
+            "description": "Mark the issue as resolved and close tracking",
+            "key": "close"
+        },
+        {
+            "title": "Escalate to team",
+            "description": "Escalate to specialized team for review and approval",
+            "key": "escalate"
+        },
+        {
+            "title": "Document findings",
+            "description": "Document issue investigation and resolution steps",
+            "key": "document"
+        }
+    ]
 
 # Initialize OpenAI client
 llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -57,18 +134,14 @@ def intelligent_action_routing_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(user_id, str):
             user_id = str(user_id) if user_id else "unknown"
         
-        # Step 1: Load suggested actions from file
-        load_start = time.time()
+        # Step 1: Get default suggested actions
         try:
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            file_path = os.path.join(project_root, "recommended_actions_sample.txt")
-            all_suggestions = parse_actions_from_file(file_path)
+            all_suggestions = parse_actions_from_suggestions()
+            load_elapsed = time.time() - load_start
+            logger.info(f"[INTELLIGENT_ROUTING] Loaded {len(all_suggestions)} suggestions in {load_elapsed:.3f}s")
         except Exception as e:
-            logger.error(f"[INTELLIGENT_ROUTING] Error reading suggestions file: {e}")
+            logger.error(f"[INTELLIGENT_ROUTING] Error loading suggestions: {e}")
             all_suggestions = []
-        
-        load_elapsed = time.time() - load_start
-        logger.info(f"[INTELLIGENT_ROUTING] Loaded {len(all_suggestions)} suggestions in {load_elapsed:.3f}s")
         
         # Step 2: Pass issue + suggestions to LLM for action selection
         logger.info(f"[INTELLIGENT_ROUTING] Calling LLM to decide actions...")

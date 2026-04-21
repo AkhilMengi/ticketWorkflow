@@ -102,11 +102,9 @@ class UpdateContractResponse(BaseModel):
     message: str
 
 
-# Recommended Actions schemas
-class RecommendedAction(BaseModel):
-    action_type: str  # "salesforce_case", "billing", or "human_in_loop"
-    description: str
-    parameters: Dict[str, Any]
+# ============================================================================
+# Intelligent Actions Response (ActionResult is defined inline in ProcessRecommendedActionsResponse)
+# ============================================================================
 
 class ActionResult(BaseModel):
     action_type: str

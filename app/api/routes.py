@@ -7,7 +7,6 @@ from app.api.schemas import (
     ProcessRecommendedActionsResponse, ExecuteIntelligentActionsRequest
 )
 from app.services.job_service import create_job, get_job, get_events
-from app.services.intelligent_action_service import execute_intelligent_recommended_actions
 from app.workers.worker import enqueue_job, enqueue_contract_job
 from app.agent.memory import get_long_term_memory
 from app.agent.routing_graph import routing_graph
@@ -340,7 +339,7 @@ def execute_intelligent_actions(payload: ExecuteIntelligentActionsRequest):
         return ProcessRecommendedActionsResponse(**response_data)
         
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=f"recommended_actions_sample.txt not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=f"Error processing request: {str(e)}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
     except TypeError as e:

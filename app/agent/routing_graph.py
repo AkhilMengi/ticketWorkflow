@@ -147,26 +147,13 @@ def build_routing_graph():
     # After enrichment, route based on system classification
     def route_by_system(state):
         import os
-        
-        # Check if recommended actions file exists (trigger for intelligent routing)
-        # Use absolute path resolution to ensure it works from any working directory
-        try:
-            current_file = os.path.abspath(__file__)
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-            file_path = os.path.join(project_root, "recommended_actions_sample.txt")
-            actions_file_exists = os.path.exists(file_path)
-        except Exception:
-            actions_file_exists = False
-        
+        # Use intelligent routing with suggestions if issue description is available
         issue_description = state.get("message", "")
         
-        # Decision logic: use intelligent routing if:
-        # 1. Recommended actions file exists, AND
-        # 2. We have an issue description to analyze
-        if actions_file_exists and issue_description:
+        if issue_description:
             return "intelligent_routing"
         
-        # Otherwise, use traditional routing
+        # Otherwise, use traditional routing as fallback
         target_system = state.get("target_system")
         needs_review = state.get("needs_manual_review", False)
         
