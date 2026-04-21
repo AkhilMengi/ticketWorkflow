@@ -7,22 +7,28 @@ from typing import List, Dict, Any
 
 def parse_actions_from_file(file_path: str) -> List[Dict[str, Any]]:
     """
-    Parse recommended actions from a YAML or JSON file.
+    Parse recommended actions/suggestions from a YAML file.
     
-    Expected format:
+    Expected format (suggestions):
+    ```
+    suggestion_1:
+      title: "Reach out to team"
+      description: "Contact team to investigate"
+    ```
+    
+    Or legacy format (action definitions):
     ```
     salesforce_case:
       description: "Create support case"
       parameters:
         priority: "high"
-        category: "billing"
     ```
     
     Args:
-        file_path: Path to the actions file
+        file_path: Path to the actions/suggestions file
     
     Returns:
-        List of action dictionaries with action_type, description, parameters
+        List of action/suggestion dictionaries with title and description
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -37,13 +43,23 @@ def parse_actions_from_file(file_path: str) -> List[Dict[str, Any]]:
             if not content:
                 return actions
             
-            for action_type, action_config in content.items():
-                if isinstance(action_config, dict):
-                    actions.append({
-                        "action_type": action_type,
-                        "description": action_config.get("description", ""),
-                        "parameters": action_config.get("parameters", {})
-                    })
+            for key, config in content.items():
+                if isinstance(config, dict):
+                    # Handle new format (suggestions with title and description)
+                    if "title" in config:
+                        actions.append({
+                            "title": config.get("title", ""),
+                            "description": config.get("description", ""),
+                            "action_type": key  # For compatibility
+                        })
+                    # Handle legacy format (action definitions)
+                    else:
+                        actions.append({
+                            "action_type": key,
+                            "description": config.get("description", ""),
+                            "title": config.get("description", ""),  # Use description as title fallback
+                            "parameters": config.get("parameters", {})
+                        })
         
         return actions
         

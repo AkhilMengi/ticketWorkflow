@@ -8,6 +8,7 @@ and aggregate results into a unified response.
 import json
 import logging
 import os
+import time
 from typing import Dict, Any, Optional
 from openai import OpenAI
 
@@ -15,7 +16,7 @@ from app.config import settings
 from app.agent.router import classify_and_route, RoutingSystem
 from app.agent.adapters import ActionType, AdapterRegistry, SalesforceAdapter, BillingAdapter
 from app.services.action_service import parse_actions_from_file
-from app.services.intelligent_action_service import analyze_issue_and_recommend_actions
+from app.services.intelligent_action_service import analyze_issue_and_select_action
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +26,26 @@ llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 def intelligent_action_routing_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Enhanced Intelligent Action Routing Node
+    ⭐ Intelligent Action Routing Node with Suggestions
     
-    ⭐ NEW: Analyzes issues and intelligently selects which actions to take
+    Flow:
+    1. Get issue description
+    2. Load suggested actions from file
+    3. Pass issue + suggestions to LLM
+    4. LLM decides what ACTION to take
+    5. Return selected action with parameters
     
-    Analyzes the request and determines which actions should be executed:
-    - Create Salesforce case?
-    - Apply billing credit?
-    - Escalate to human?
+    Examples:
+    - Issue: "Usage higher than expected" + Suggestions → LLM decides: "create_case"
+    - Issue: "Double charged" + Suggestions → LLM decides: "apply_billing_adjustment"
+    - Issue: "Complex issue" + Suggestions → LLM decides: "escalate_to_team"
     
-    Input: Issue description, user info, context
-    Output: Recommended actions with execution plan
+    Input: Issue description, user info
+    Output: Selected action + parameters + reasoning
     """
     
-    logger.info(f"[INTELLIGENT_ROUTING] Analyzing issue for user {state.get('user_id')}")
+    node_start_time = time.time()
+    logger.info(f"[INTELLIGENT_ROUTING] Starting intelligent routing for user {state.get('user_id')}")
     
     try:
         issue_description = state.get("message") or state.get("issue_type") or ""
@@ -50,71 +57,82 @@ def intelligent_action_routing_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(user_id, str):
             user_id = str(user_id) if user_id else "unknown"
         
-        # Step 1: Analyze issue using AI
-        logger.info(f"[INTELLIGENT_ROUTING] Using AI to analyze issue...")
-        analysis = analyze_issue_and_recommend_actions(issue_description, user_id)
-        
-        severity = analysis.get("severity", "medium")
-        issue_analysis = analysis.get("issue_analysis", "")
-        
-        logger.info(f"[INTELLIGENT_ROUTING] Severity: {severity}")
-        logger.info(f"[INTELLIGENT_ROUTING] Analysis: {issue_analysis}")
-        
-        # Step 2: Parse recommended actions from file
+        # Step 1: Load suggested actions from file
+        load_start = time.time()
         try:
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             file_path = os.path.join(project_root, "recommended_actions_sample.txt")
-            all_actions = parse_actions_from_file(file_path)
+            all_suggestions = parse_actions_from_file(file_path)
         except Exception as e:
-            logger.error(f"[INTELLIGENT_ROUTING] Error reading actions file: {e}")
-            all_actions = []
+            logger.error(f"[INTELLIGENT_ROUTING] Error reading suggestions file: {e}")
+            all_suggestions = []
         
-        # Step 3: Filter actions based on AI recommendations
+        load_elapsed = time.time() - load_start
+        logger.info(f"[INTELLIGENT_ROUTING] Loaded {len(all_suggestions)} suggestions in {load_elapsed:.3f}s")
+        
+        # Step 2: Pass issue + suggestions to LLM for action selection
+        logger.info(f"[INTELLIGENT_ROUTING] Calling LLM to decide actions...")
+        action_selection = analyze_issue_and_select_action(
+            issue_description=issue_description,
+            user_id=user_id,
+            suggestions=all_suggestions
+        )
+        
+        selected_actions = action_selection.get("selected_actions", [])
+        issue_summary = action_selection.get("issue_summary", "")
+        overall_confidence = action_selection.get("overall_confidence", 0.5)
+        
+        logger.info(f"[INTELLIGENT_ROUTING] LLM selected {len(selected_actions)} action(s) (overall confidence: {overall_confidence:.2%})")
+        
+        # Step 3: Map each action type to system action handlers
+        action_type_map = {
+            "create_case": "create_case",
+            "apply_billing_adjustment": "apply_billing_adjustment",
+            "escalate_to_team": "escalate_to_team",
+            "send_notification": "send_notification",
+            "do_nothing": "do_nothing"
+        }
+        
+        # Step 4: Prepare recommended actions for execution (multiple actions)
         recommended_actions = []
-        action_decisions = {}
         
-        for ai_action_rec in analysis.get("actions", []):
-            action_type = ai_action_rec.get("action_type", "unknown")
-            should_execute = ai_action_rec.get("should_execute", False)
-            reason = ai_action_rec.get("reason", "No reason provided")
-            priority = ai_action_rec.get("priority", "low")
+        for action_item in selected_actions:
+            action_type = action_item.get("action_type", "do_nothing")
+            final_action = action_type_map.get(action_type, "create_case")
+            confidence = action_item.get("confidence", 0.5)
+            priority = action_item.get("priority", "primary")
+            reasoning = action_item.get("reasoning", "")
+            action_params = action_item.get("action_parameters", {})
             
-            if not action_type:
-                action_type = "unknown"
-            if not reason:
-                reason = "No reason provided"
-            if not priority:
-                priority = "low"
-            
-            action_decisions[action_type] = {
-                "should_execute": should_execute,
-                "reason": reason,
-                "priority": priority
-            }
-            
-            if should_execute:
-                # Find matching action from file
-                matching_action = next(
-                    (act for act in all_actions if act["action_type"] == action_type),
-                    None
-                )
-                
-                if matching_action:
-                    recommended_actions.append({
-                        "action": matching_action,
-                        "priority": priority,
-                        "decision_reason": reason
-                    })
-                    logger.info(f"[INTELLIGENT_ROUTING] Selected: {action_type} (priority: {priority})")
+            if final_action != "do_nothing":
+                recommended_actions.append({
+                    "action_type": final_action,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "issue_summary": issue_summary,
+                    "action_parameters": action_params,
+                    "priority": action_params.get("priority", "Medium"),
+                    "action_priority": priority,  # primary, secondary, tertiary
+                    "action": {
+                        "action_type": final_action,
+                        "description": reasoning,
+                        "parameters": action_params
+                    }
+                })
+                logger.info(f"[INTELLIGENT_ROUTING] Action prepared ({priority}): {final_action} (confidence: {confidence:.2%})")
+        
+        if not recommended_actions:
+            logger.info(f"[INTELLIGENT_ROUTING] No actions needed based on LLM decision")
         
         # Log the routing event
         routing_event = {
-            "type": "intelligent_action_routing",
-            "severity": severity,
-            "ai_analysis": issue_analysis,
-            "total_actions_available": len(all_actions),
-            "recommended_actions_count": len(recommended_actions),
-            "action_decisions": action_decisions
+            "type": "intelligent_action_routing_with_suggestions",
+            "issue_summary": issue_summary,
+            "suggestions_count": len(all_suggestions),
+            "selected_actions_count": len(recommended_actions),
+            "actions": [{"type": a["action_type"], "priority": a["action_priority"], "confidence": a["confidence"]} for a in recommended_actions],
+            "overall_confidence": overall_confidence,
+            "reasoning": " | ".join([f"{a['action_priority']}: {a['reasoning']}" for a in recommended_actions])
         }
         
         # Ensure event_log is safe
@@ -122,17 +140,42 @@ def intelligent_action_routing_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(event_log, list):
             event_log = []
         
+        node_elapsed = time.time() - node_start_time
+        logger.info(f"[INTELLIGENT_ROUTING] Node completed in {node_elapsed:.2f}s - Selected {len(recommended_actions)} action(s)")
+        
+        # Determine issue severity based on multiple actions and confidence
+        action_confidences = [a["confidence"] for a in recommended_actions]
+        avg_confidence = sum(action_confidences) / len(action_confidences) if action_confidences else overall_confidence
+        
+        if len(recommended_actions) >= 2:
+            issue_severity = "high"  # Multiple actions needed → high severity
+        elif avg_confidence > 0.8:
+            issue_severity = "high"
+        else:
+            issue_severity = "medium"
+        
+        # Build action_decisions dict for all actions
+        action_decisions = {}
+        for action in recommended_actions:
+            action_decisions[action["action_type"]] = {
+                "selected": True,
+                "reasoning": action["reasoning"],
+                "confidence": action["confidence"],
+                "priority": action["action_priority"]
+            }
+        
         return {
-            "issue_severity": severity,
-            "ai_analysis": issue_analysis,
+            "issue_severity": issue_severity,
+            "ai_analysis": " | ".join([a["reasoning"] for a in recommended_actions]) if recommended_actions else "No action needed",
             "recommended_actions": recommended_actions,
             "action_decisions": action_decisions,
-            "routing_type": "intelligent_actions",
+            "routing_type": "intelligent_actions_with_suggestions",
             "event_log": event_log + [routing_event]
         }
         
     except Exception as e:
-        logger.error(f"[INTELLIGENT_ROUTING] Error in intelligent routing: {str(e)}", exc_info=True)
+        node_elapsed = time.time() - node_start_time
+        logger.error(f"[INTELLIGENT_ROUTING] Error after {node_elapsed:.2f}s: {str(e)}", exc_info=True)
         # Return safe default state if intelligent routing fails
         event_log_safe = state.get("event_log", []) or []
         if not isinstance(event_log_safe, list):
@@ -143,7 +186,7 @@ def intelligent_action_routing_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "ai_analysis": f"Error during analysis: {str(e)}",
             "recommended_actions": [],
             "action_decisions": {},
-            "routing_type": "intelligent_actions",
+            "routing_type": "intelligent_actions_with_suggestions",
             "event_log": event_log_safe + [{
                 "type": "intelligent_action_routing_error",
                 "error": str(e)
@@ -407,10 +450,9 @@ def intelligent_actions_execution_node(
     
     Executes the AI-recommended actions determined by intelligent_action_routing_node.
     
-    Executes actions in order:
-    1. Salesforce case creation (if recommended)
-    2. Billing credits/refunds (if recommended)
-    3. Human escalation (if recommended)
+    Handles BOTH old and new action type names:
+    - OLD: salesforce_case, billing, human_in_loop
+    - NEW (Semantic): create_case, apply_billing_adjustment, escalate_to_team
     
     Input: State with recommended_actions from intelligent routing
     Output: Execution results for each action
@@ -434,31 +476,64 @@ def intelligent_actions_execution_node(
     
     # Execute each recommended action
     for action_item in recommended_actions:
+        # Handle both old and new structure
+        # Old: action_item = {"action": {...}, "priority": "...", "decision_reason": "..."}
+        # New: action_item = {"action_type": "create_case", "confidence": 0.9, "reasoning": "..."}
+        
+        # Try to get action from nested "action" field (old structure)
         action = action_item.get("action", {})
-        action_type = action.get("action_type", "unknown")
-        priority = action_item.get("priority", "medium")
-        decision_reason = action_item.get("decision_reason", "Action recommended by AI")
+        
+        # Get action_type - could be at top level (new) or nested (old)
+        action_type = action_item.get("action_type")
+        if not action_type:
+            action_type = action.get("action_type", "unknown")
+        
+        # Normalize action type names: map new names to action types
+        # NEW: create_case → salesforce_case
+        # NEW: apply_billing_adjustment → billing
+        # NEW: escalate_to_team → human_in_loop
+        action_type_normalized = action_type
+        if action_type == "create_case":
+            action_type_normalized = "salesforce_case"
+        elif action_type == "apply_billing_adjustment":
+            action_type_normalized = "billing"
+        elif action_type == "escalate_to_team":
+            action_type_normalized = "human_in_loop"
+        
+        priority = action_item.get("priority") or action.get("priority", "medium")
+        decision_reason = action_item.get("reasoning") or action_item.get("decision_reason") or \
+                         action.get("decision_reason", "Action recommended by AI")
+        confidence = action_item.get("confidence", 1.0)
+        
+        # Get suggested parameters from new structure
+        suggested_params = action_item.get("suggested_parameters", {})
+        
+        # Merge with action parameters from old structure
+        action_params = action.get("parameters", {})
+        all_params = {**action_params, **suggested_params}
         
         # Ensure all values are strings, not None
-        if not action_type:
-            action_type = "unknown"
+        if not action_type_normalized:
+            action_type_normalized = "unknown"
         if not priority:
             priority = "medium"
         if not decision_reason:
             decision_reason = "Action recommended by AI"
         
         result = {
-            "action_type": action_type,
+            "action_type": action_type,  # Keep original name in result
+            "action_type_normalized": action_type_normalized,  # Store normalized for tracking
             "priority": priority,
             "reason": decision_reason,
+            "confidence": confidence,
             "status": "unknown",
             "details": {}
         }
         
         try:
-            if action_type == "salesforce_case":
+            if action_type_normalized == "salesforce_case":
                 # Execute SF case creation
-                logger.info(f"[INTELLIGENT_EXEC] Creating Salesforce case...")
+                logger.info(f"[INTELLIGENT_EXEC] Creating Salesforce case (from {action_type})...")
                 
                 # Ensure priority has a safe value  
                 priority_value = priority if priority else "medium"
@@ -470,13 +545,14 @@ def intelligent_actions_execution_node(
                     "backend_context": {
                         **state.get("backend_context", {}),
                         "ai_severity": state.get("issue_severity"),
-                        "ai_decision_reason": decision_reason
+                        "ai_decision_reason": decision_reason,
+                        "ai_confidence": confidence
                     },
                     "agent_result": {
                         "status": "Agentic",
                         "summary": action.get("description", "Support Case"),
-                        "category": action.get("parameters", {}).get("category", "Support"),
-                        "priority": action.get("parameters", {}).get("priority", priority_value.capitalize())
+                        "category": all_params.get("category", "Support"),
+                        "priority": all_params.get("priority", priority_value.capitalize())
                     }
                 }
                 
@@ -489,15 +565,14 @@ def intelligent_actions_execution_node(
                     "error": sf_result.get("error")
                 }
                 
-            elif action_type == "billing":
+            elif action_type_normalized == "billing":
                 # Execute billing action
-                logger.info(f"[INTELLIGENT_EXEC] Processing billing action...")
+                logger.info(f"[INTELLIGENT_EXEC] Processing billing action (from {action_type})...")
                 
-                params = action.get("parameters", {})
                 action_payload = {
                     "user_id": state.get("user_id"),
-                    "amount": params.get("amount", 0),
-                    "reason": params.get("reason", decision_reason)
+                    "amount": all_params.get("amount", 0),
+                    "reason": all_params.get("reason", decision_reason)
                 }
                 
                 billing_result = billing_adapter.execute_action(ActionType.APPLY_CREDIT, action_payload)
@@ -505,25 +580,24 @@ def intelligent_actions_execution_node(
                 result["status"] = "success" if billing_result["success"] else "failed"
                 result["details"] = {
                     "transaction_id": billing_result.get("result_id", "Unknown"),
-                    "amount": params.get("amount", 0),
+                    "amount": all_params.get("amount", 0),
                     "error": billing_result.get("error", "")
                 }
                 
-            elif action_type == "human_in_loop":
+            elif action_type_normalized == "human_in_loop":
                 # Create escalation record (typically doesn't execute via adapter, logged for manual handling)
-                logger.info(f"[INTELLIGENT_EXEC] Creating escalation for human review...")
+                logger.info(f"[INTELLIGENT_EXEC] Creating escalation for human review (from {action_type})...")
                 
-                params = action.get("parameters", {})
                 result["status"] = "pending_human_review"
                 result["details"] = {
-                    "escalation_team": params.get("team", "Support"),
-                    "escalation_priority": params.get("priority", "normal"),
-                    "escalation_reason": params.get("reason", decision_reason)
+                    "escalation_team": all_params.get("team", "Support"),
+                    "escalation_priority": all_params.get("priority", "normal"),
+                    "escalation_reason": decision_reason
                 }
             
             else:
                 result["status"] = "unknown_action"
-                logger.warning(f"[INTELLIGENT_EXEC] Unknown action type: {action_type}")
+                logger.warning(f"[INTELLIGENT_EXEC] Unknown action type: {action_type} (normalized: {action_type_normalized})")
             
             # Count results
             if result["status"] == "success":
