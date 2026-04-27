@@ -1,78 +1,101 @@
-from langgraph.graph import StateGraph, END
+"""
+LangGraph workflow — compiles the agentic graph.
+
+Graph topology
+──────────────
+  START
+    │
+    ▼
+  fetch_account          ← loads account details from CRM/DB
+    │
+    ▼
+  analyze_issue          ← LLM reads issue + suggestions → decides actions
+    │
+    ▼ (conditional edge)
+    ├─ actions needed  ──► execute_actions  ← runs SF case + billing API
+    │                           │
+    │                           ▼
+    └─ no actions  ─────────► summarize     ← builds final response
+                                │
+                                ▼
+                              END
+
+Why conditional routing?
+  • If the LLM decides no action is needed (e.g. the issue is already resolved
+    or just informational) we skip straight to summarize, avoiding unnecessary
+    API calls.
+  • Otherwise, execute_actions handles any combination of SF case and/or
+    billing API in a single pass.
+"""
+import logging
+from functools import lru_cache
+
+from langgraph.graph import StateGraph, START, END
+
 from app.agent.state import AgentState
 from app.agent.nodes import (
-    decision_node,
-    fetch_profile_node,
-    fetch_logs_node,
-    classify_node,
-    create_case_node
-)
-from app.agent.tools import update_existing_case, lookup_existing_case
-
-builder = StateGraph(AgentState)
-
-builder.add_node("decide", decision_node)
-builder.add_node("fetch_profile", fetch_profile_node)
-builder.add_node("fetch_logs", fetch_logs_node)
-builder.add_node("classify", classify_node)
-builder.add_node("create_case", create_case_node)
-
-builder.set_entry_point("decide")
-
-def route_decision(state):
-    action = state["next_action"]
-
-    if action == "fetch_profile":
-        return "fetch_profile"
-    elif action == "fetch_logs":
-        return "fetch_logs"
-    elif action == "create_case" or action == "update_case":
-        return "classify"
-    elif action == "finish":
-        return END
-    else:
-        return END
-
-builder.add_conditional_edges(
-    "decide",
-    route_decision,
-    {
-        "fetch_profile": "fetch_profile",
-        "fetch_logs": "fetch_logs",
-        "classify": "classify",
-        END: END
-    }
+    fetch_account_node,
+    analyze_issue_node,
+    execute_actions_node,
+    summarize_node,
 )
 
-def route_classification(state):
-    """After classification, decide to create new or update existing case"""
-    existing_cases = lookup_existing_case(state["user_id"], state["issue_type"])
-    
-    if existing_cases.get("existing_case_found") and existing_cases.get("case_count", 0) > 0:
-        # Update existing case
-        state["case_id"] = existing_cases["cases"][0]["id"]
-        return "update_case"
-    else:
-        # Create new case
-        return "create_case"
+logger = logging.getLogger(__name__)
 
-def route_case_action(state):
-    """Route to create or update case based on state"""
-    if state.get("case_id"):
-        return "update_case"
-    else:
-        return "create_case"
 
-builder.add_edge("fetch_profile", "decide")
-builder.add_edge("fetch_logs", "decide")
-builder.add_conditional_edges(
-    "classify",
-    route_case_action,
-    {
-        "create_case": "create_case",
-        "update_case": "create_case"  # Reuse create_case node but with update_case logic
-    }
-)
-builder.add_edge("create_case", END)
+# ── Routing function ──────────────────────────────────────────────────────────
 
-agent_graph = builder.compile()
+def _route_after_analysis(state: AgentState) -> str:
+    """
+    Decide the next node after the LLM has analysed the issue.
+
+    Returns:
+      "execute_actions" – one or more actions are queued
+      "summarize"       – nothing to execute (no-op or already resolved)
+    """
+    if state.get("recommended_actions"):
+        return "execute_actions"
+    logger.info(
+        "No actions recommended for account %s — routing to summarize.",
+        state.get("account_id"),
+    )
+    return "summarize"
+
+
+# ── Graph builder ─────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def build_agent_graph():
+    """Build and compile the LangGraph StateGraph (cached singleton)."""
+    graph = StateGraph(AgentState)
+
+    # ── Register nodes ────────────────────────────────────────────────────────
+    graph.add_node("fetch_account", fetch_account_node)
+    graph.add_node("analyze_issue", analyze_issue_node)
+    graph.add_node("execute_actions", execute_actions_node)
+    graph.add_node("summarize", summarize_node)
+
+    # ── Wire edges ────────────────────────────────────────────────────────────
+    graph.add_edge(START, "fetch_account")
+    graph.add_edge("fetch_account", "analyze_issue")
+
+    # Conditional: does the LLM want to take action, or skip straight to summary?
+    graph.add_conditional_edges(
+        "analyze_issue",
+        _route_after_analysis,
+        {
+            "execute_actions": "execute_actions",
+            "summarize": "summarize",
+        },
+    )
+
+    graph.add_edge("execute_actions", "summarize")
+    graph.add_edge("summarize", END)
+
+    compiled = graph.compile()
+    logger.info("LangGraph agent compiled successfully.")
+    return compiled
+
+
+# Public handle used by API routes
+agent_graph = build_agent_graph()

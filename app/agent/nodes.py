@@ -1,159 +1,239 @@
+"""
+LangGraph nodes — each function transforms the AgentState.
+
+Flow (see graph.py):
+  START
+    └── fetch_account_node      (load account details from CRM / DB)
+          └── analyze_issue_node  (LLM reads issue + suggestions → decides actions)
+                └── [conditional routing]
+                      ├── execute_actions_node  (runs SF case + billing API)
+                      │       └── summarize_node
+                      └── summarize_node  (if no actions needed)
+                              └── END
+"""
 import json
-from openai import OpenAI
-from app.config import settings
-from app.agent.validators import AgentDecision, ClassificationResult
-from app.agent.prompts import DECISION_PROMPT, CLASSIFICATION_PROMPT
-from app.agent.tools import get_customer_profile, get_payment_logs, create_salesforce_case, lookup_existing_case
+import logging
+import yaml
+from typing import Dict, Any
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
 
-def decision_node(state):
-    # Check for existing cases
-    existing_cases = lookup_existing_case(state["user_id"], state["issue_type"])
-    
-    # ⚠️ PREVENT INFINITE LOOPS: If both profile and logs exist, move to create_case
-    has_profile = state["customer_profile"] is not None
-    has_logs = state["logs"] is not None
-    has_classification = state["summary"] is not None
-    retries = state.get("retries", 0)
-    
-    # If we have all necessary data and have retried too many times, force create_case
-    if has_profile and has_logs and retries > 3:
-        print(f"[LOOP PREVENTION] Forcing create_case after {retries} retries")
-        return {
-            "next_action": "create_case",
-            "retries": retries + 1,
-            "event_log": state["event_log"] + [{
-                "type": "decision",
-                "thought": "Loop prevention: Have all data, forcing create_case",
-                "action": "create_case",
-                "confidence": 0.95,
-                "rationale": "Prevention of infinite fetch_logs loop - all required data available"
-            }]
+from app.agent.state import AgentState
+from app.agent.prompts import ANALYZE_ISSUE_PROMPT
+from app.services.salesforce import create_sf_case
+from app.services.billing import call_billing_api
+from app.config import OPENAI_API_KEY
+
+logger = logging.getLogger(__name__)
+
+# ── LLM (lazy singleton) ──────────────────────────────────────────────────────
+
+_llm: ChatOpenAI | None = None
+
+
+def _get_llm() -> ChatOpenAI:
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0,
+            api_key=OPENAI_API_KEY,
+        )
+    return _llm
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _load_suggestions() -> str:
+    """Load business suggestions from suggestions.txt (YAML format)."""
+    try:
+        with open("suggestions.txt", "r") as fh:
+            data = yaml.safe_load(fh.read())
+        lines = []
+        for value in data.values():
+            title = value.get("title", "")
+            desc = value.get("description", "")
+            lines.append(f"  • {title}: {desc}")
+        result = "\n".join(lines)
+        logger.info("✅ suggestions.txt loaded (%d suggestions):\n%s", len(data), result)
+        return result
+    except Exception as exc:
+        logger.warning("⚠️  Could not load suggestions.txt: %s", exc)
+        return (
+            "  • Check customer details: Verify account information and payment history.\n"
+            "  • Rebill the account: Reprocess billing or apply credits/adjustments.\n"
+            "  • Close the case: Mark the issue as resolved."
+        )
+
+
+def _parse_llm_json(content: str) -> Dict[str, Any]:
+    """Strip optional markdown fences and parse JSON."""
+    text = content.strip()
+    if text.startswith("```"):
+        # remove ```json ... ``` wrapper
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
+    return json.loads(text)
+
+
+# ── Node 1: fetch_account_node ────────────────────────────────────────────────
+
+def fetch_account_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Retrieve account details from CRM / database.
+    This mock returns realistic data; replace with a real DB/API call.
+    """
+    account_id = state["account_id"]
+    logger.info("Fetching account details for %s", account_id)
+
+    # TODO: replace with actual CRM / DB lookup
+    account_details: Dict[str, Any] = {
+        "account_id": account_id,
+        "name": f"Customer_{account_id}",
+        "email": f"customer_{account_id.lower()}@example.com",
+        "plan": "Premium",
+        "status": "Active",
+        "billing_cycle": "Monthly",
+        "outstanding_balance": 0.00,
+        "last_payment_date": "2026-04-01",
+        "last_payment_amount": 99.00,
+        "open_tickets": 0,
+        "account_age_months": 18,
+    }
+
+    return {"account_details": account_details}
+
+
+# ── Node 2: analyze_issue_node ────────────────────────────────────────────────
+
+def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
+    """
+    LLM analyses the issue + account context + business suggestions and
+    decides which system actions are required, generating exact payloads.
+    """
+    logger.info("Analyzing issue for account %s with LLM…", state["account_id"])
+
+    suggestions = _load_suggestions()
+    prompt = ANALYZE_ISSUE_PROMPT.format(
+        account_id=state["account_id"],
+        account_details=json.dumps(state["account_details"], indent=2),
+        issue_description=state["issue_description"],
+        suggestions=suggestions,
+    )
+
+    try:
+        response = _get_llm().invoke([HumanMessage(content=prompt)])
+        result = _parse_llm_json(response.content)
+    except json.JSONDecodeError as exc:
+        logger.error("LLM returned invalid JSON: %s", exc)
+        # Safe fallback — always create a case when we can't parse the response
+        result = {
+            "analysis": "Unable to fully analyse the issue (LLM parse error).",
+            "reasoning": "Defaulting to case creation for human review.",
+            "recommended_actions": ["create_sf_case"],
+            "sf_case_payload": {
+                "subject": f"Issue for account {state['account_id']}",
+                "description": state["issue_description"],
+                "priority": "Medium",
+                "status": "New",
+                "origin": "Web",
+                "account_id": state["account_id"],
+            },
+            "billing_payload": {},
         }
-    
-    # Format prompt with actual context
-    prompt_context = DECISION_PROMPT.format(
-        user_id=state["user_id"],
-        issue_type=state["issue_type"],
-        message=state.get("message", "")[:200],
-        has_profile=has_profile,
-        has_logs=has_logs,
-        has_classification=has_classification,
-        existing_cases_count=existing_cases.get("case_count", 0)
-    )
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": prompt_context},
-            {"role": "user", "content": f"Customer profile: {json.dumps(state['customer_profile'])}\nLogs: {json.dumps(state['logs'])}\nContext: {json.dumps(state['backend_context'])}"}
-        ],
-        response_format={"type": "json_object"}
+
+    logger.info(
+        "LLM recommended actions: %s  |  analysis: %s",
+        result.get("recommended_actions", []),
+        result.get("analysis", "")[:120],
     )
 
-    parsed = json.loads(response.choices[0].message.content)
-
     return {
-        "next_action": parsed["action"],
-        "retries": retries + 1,
-        "event_log": state["event_log"] + [{
-            "type": "decision",
-            "thought": parsed.get("thought", ""),
-            "action": parsed["action"],
-            "confidence": parsed.get("confidence", 0.5),
-            "rationale": parsed.get("rationale", "")
-        }]
+        "issue_analysis": result.get("analysis", ""),
+        "action_reasoning": result.get("reasoning", ""),
+        "recommended_actions": result.get("recommended_actions", []),
+        "sf_case_payload": result.get("sf_case_payload", {}),
+        "billing_payload": result.get("billing_payload", {}),
     }
 
-def fetch_profile_node(state):
-    profile = get_customer_profile(state["user_id"])
 
-    if not isinstance(profile, dict) or "tier" not in profile:
-        raise ValueError("Invalid customer profile response")
+# ── Node 3: execute_actions_node ──────────────────────────────────────────────
 
-    return {
-        "customer_profile": profile,
-        "event_log": state["event_log"] + [{
-            "type": "tool_result",
-            "tool": "get_customer_profile",
-            "result": profile,
-            "status": "success"
-        }]
-    }
+def execute_actions_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Execute every action the LLM recommended.
 
-def fetch_logs_node(state):
-    logs = get_payment_logs(state["user_id"])
+    Supports:
+      • create_sf_case   → calls Salesforce REST API
+      • call_billing_api → calls billing micro-service
 
-    if not isinstance(logs, list):
-        raise ValueError("Invalid payment logs response")
+    Both can run in the same pass if the LLM selected both.
+    """
+    recommended = state.get("recommended_actions", [])
+    logger.info("Executing actions: %s", recommended)
 
-    return {
-        "logs": logs,
-        "event_log": state["event_log"] + [{
-            "type": "tool_result",
-            "tool": "get_payment_logs",
-            "result": logs,
-            "status": "success"
-        }]
-    }
+    actions_executed = []
+    sf_result = None
+    billing_result = None
 
-def classify_node(state):
-    # Format prompt with actual context
-    profile_str = json.dumps(state["customer_profile"]) if state["customer_profile"] else "None"
-    
-    prompt_context = CLASSIFICATION_PROMPT.format(
-        issue_type=state["issue_type"],
-        message=state.get("message", "")[:500],
-        tier=state["customer_profile"].get("tier", "Unknown") if state["customer_profile"] else "Unknown",
-        profile=profile_str[:200]
-    )
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": prompt_context},
-            {"role": "user", "content": f"Issue category: {state['issue_type']}\nMessage: {state.get('message', '')}\nLogs: {json.dumps(state['logs'])}"}
-        ],
-        response_format={"type": "json_object"}
-    )
+    if "create_sf_case" in recommended:
+        logger.info("Creating Salesforce case…")
+        sf_result = create_sf_case(state.get("sf_case_payload", {}))
+        if sf_result.get("success"):
+            actions_executed.append("create_sf_case")
+            logger.info("SF case created: id=%s", sf_result.get("id"))
+        else:
+            logger.warning("SF case creation failed: %s", sf_result.get("error"))
 
-    parsed = json.loads(response.choices[0].message.content)
+    if "call_billing_api" in recommended:
+        logger.info("Calling billing API…")
+        billing_result = call_billing_api(state.get("billing_payload", {}))
+        if billing_result.get("success"):
+            actions_executed.append("call_billing_api")
+            logger.info("Billing txn: %s", billing_result.get("transaction_id"))
+        else:
+            logger.warning("Billing API failed: %s", billing_result.get("error"))
 
     return {
-        "summary": parsed["summary"],
-        "category": parsed["category"],
-        "priority": parsed["priority"],
-        "event_log": state["event_log"] + [{
-            "type": "classification",
-            "summary": parsed["summary"],
-            "category": parsed.get("category", "other"),
-            "priority": parsed["priority"],
-            "priority_score": parsed.get("priority_score", 5),
-            "reasoning": parsed.get("reasoning", ""),
-            "escalation_needed": parsed.get("escalation_needed", False),
-            "tags": parsed.get("tags", [])
-        }]
+        "sf_case_result": sf_result,
+        "billing_result": billing_result,
+        "actions_executed": actions_executed,
     }
 
-def create_case_node(state):
-    result = create_salesforce_case(state)
 
-    if "id" not in result:
-        raise ValueError("Salesforce case creation failed")
+# ── Node 4: summarize_node ────────────────────────────────────────────────────
 
-    return {
-        "case_id": result["id"],
-        "final_answer": {
-            "summary": state.get("summary"),
-            "category": state.get("category"),
-            "priority": state.get("priority"),
-            "case_id": result["id"]
-        },
-        "event_log": state["event_log"] + [{
-            "type": "tool_result",
-            "tool": "create_salesforce_case",
-            "result": result,
-            "status": "success"
-        }]
-    }
+def summarize_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Compile a human-readable summary of everything the agent did.
+    """
+    parts = [
+        f"Analysis: {state.get('issue_analysis', 'N/A')}",
+        f"Reasoning: {state.get('action_reasoning', 'N/A')}",
+        f"Recommended: {', '.join(state.get('recommended_actions', [])) or 'none'}",
+        f"Executed: {', '.join(state.get('actions_executed', [])) or 'none'}",
+    ]
+
+    sf = state.get("sf_case_result")
+    if sf:
+        if sf.get("success"):
+            parts.append(
+                f"Salesforce Case: created (id={sf.get('id')}, "
+                f"case#={sf.get('case_number')})"
+            )
+        else:
+            parts.append(f"Salesforce Case: FAILED – {sf.get('error')}")
+
+    br = state.get("billing_result")
+    if br:
+        if br.get("success"):
+            parts.append(
+                f"Billing Action: {br.get('action_type')} processed "
+                f"(txn={br.get('transaction_id')}, amount={br.get('amount')} "
+                f"{br.get('currency', 'USD')})"
+            )
+        else:
+            parts.append(f"Billing Action: FAILED – {br.get('error')}")
+
+    return {"final_summary": " | ".join(parts)}

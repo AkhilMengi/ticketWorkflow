@@ -1,126 +1,52 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
-
-class CreateJobRequest(BaseModel):
-    user_id: str
-    issue_type: str
-    message: Optional[str] = None
-
-class CreateJobResponse(BaseModel):
-    job_id: str
-    status: str
-
-class JobStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    result: Optional[Dict[str, Any]] = None
-
-class EventsResponse(BaseModel):
-    job_id: str
-    events: List[Dict[str, Any]]
-
-class UpdateCaseRequest(BaseModel):
-    case_id: str
-    subject: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    priority: Optional[str] = None
-    agent_result: Optional[Dict[str, Any]] = None
-
-class UpdateCaseResponse(BaseModel):
-    success: bool
-    message: str
-
-class AddCommentRequest(BaseModel):
-    case_id: str
-    comment_text: str
-
-class AddCommentResponse(BaseModel):
-    comment_id: str
-    case_id: str
-    message: str
-
-class CloseCaseRequest(BaseModel):
-    case_id: str
-    subject: Optional[str] = None
-    summary: Optional[str] = None
-    resolution_notes: Optional[str] = None
-
-class CloseCaseResponse(BaseModel):
-    success: bool
-    case_id: str
-    message: str
-
-class LookupCasesRequest(BaseModel):
-    user_id: str
-    status: str = "New"
-
-class LookupCasesResponse(BaseModel):
-    user_id: str
-    case_count: int
-    cases: List[Dict[str, Any]]
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 
 
-# Contract-related schemas
-class CreateContractRequest(BaseModel):
-    user_id: str
-    account_id: str  # Required: Salesforce Account ID
-    tenant_name: str
-    property_address: str
-    move_in_date: str  # Format: YYYY-MM-DD
-    move_out_date: str  # Format: YYYY-MM-DD
-    rent_amount: float
+# ── Request ───────────────────────────────────────────────────────────────────
 
-class CreateContractResponse(BaseModel):
-    job_id: str
-    status: str
-
-class ContractStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    result: Optional[Dict[str, Any]] = None
-
-class ContractDetailsResponse(BaseModel):
-    contract_id: str
-    tenant_name: str
-    property_address: str
-    move_in_date: str
-    move_out_date: str
-    rent_amount: float
-    status: str
-    created_date: Optional[str] = None
-
-class UpdateContractRequest(BaseModel):
-    contract_id: str
-    status: Optional[str] = None
-    move_out_date: Optional[str] = None
-    rent_amount: Optional[float] = None
-
-class UpdateContractResponse(BaseModel):
-    success: bool
-    contract_id: str
-    message: str
+class IssueRequest(BaseModel):
+    account_id: str = Field(..., example="ACC-1001", description="Internal account identifier")
+    issue_description: str = Field(
+        ...,
+        example="Customer was double-charged this month and is requesting a refund.",
+        description="Plain-language description of the problem reported by the customer.",
+    )
 
 
-# ============================================================================
-# Intelligent Actions Response (ActionResult is defined inline in ProcessRecommendedActionsResponse)
-# ============================================================================
+# ── Response ──────────────────────────────────────────────────────────────────
 
-class ActionResult(BaseModel):
-    action_type: str
-    status: str  # "success", "failed", "pending_human_review"
-    result: Dict[str, Any]
-    error: Optional[str] = None
+class IssueResponse(BaseModel):
+    account_id: str
+    issue_description: str
 
-class ProcessRecommendedActionsResponse(BaseModel):
-    job_id: str
-    user_id: str
-    total_actions: int
-    results: List[ActionResult]
-    summary: Dict[str, Any]
+    # LLM analysis
+    issue_analysis: str = Field(description="LLM's analysis of the issue")
+    action_reasoning: str = Field(description="LLM's reasoning for choosing these actions")
 
-# Intelligent Actions Endpoint Schema
-class ExecuteIntelligentActionsRequest(BaseModel):
-    user_id: str
-    issue_description: str  # Description of the issue
-    priority: Optional[str] = None  # Optional: low, medium, high, critical
+    # Decisions
+    recommended_actions: List[str] = Field(
+        description="Actions the LLM recommended (create_sf_case, call_billing_api)"
+    )
+    actions_executed: List[str] = Field(
+        description="Actions that were actually executed successfully"
+    )
+
+    # Results
+    sf_case_result: Optional[Dict[str, Any]] = Field(
+        None, description="Salesforce case creation result"
+    )
+    billing_result: Optional[Dict[str, Any]] = Field(
+        None, description="Billing API call result"
+    )
+
+    # Summary
+    final_summary: str = Field(description="Human-readable summary of all actions taken")
+    error: Optional[str] = Field(None, description="Error message if the workflow failed")
+
+
+# ── Streaming event (SSE) ─────────────────────────────────────────────────────
+
+class AgentEvent(BaseModel):
+    event: str = Field(description="Event type: node_start | node_complete | workflow_complete | error")
+    node: Optional[str] = Field(None, description="Graph node name")
+    data: Optional[Dict[str, Any]] = Field(None, description="Node output or error detail")

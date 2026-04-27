@@ -3,16 +3,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class Settings:
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
-    SF_CLIENT_ID = os.getenv("SF_CLIENT_ID")
-    SF_CLIENT_SECRET = os.getenv("SF_CLIENT_SECRET")
-    SF_USERNAME = os.getenv("SF_USERNAME")
-    SF_PASSWORD = os.getenv("SF_PASSWORD")
-    SF_SECURITY_TOKEN = os.getenv("SF_SECURITY_TOKEN")
-    SF_LOGIN_URL = os.getenv("SF_LOGIN_URL", "https://login.salesforce.com")
+SF_CLIENT_ID: str = os.getenv("SF_CLIENT_ID", "")
+SF_CLIENT_SECRET: str = os.getenv("SF_CLIENT_SECRET", "")
+SF_LOGIN_URL: str = os.getenv("SF_LOGIN_URL", "https://login.salesforce.com")
 
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agent.db")
+# Set to "true" to skip real SF API calls during local testing
+MOCK_SALESFORCE: bool = os.getenv("MOCK_SALESFORCE", "true").lower() == "true"
 
-settings = Settings()
+# Set to "true" to skip real billing API calls
+MOCK_BILLING: bool = os.getenv("MOCK_BILLING", "true").lower() == "true"
+
+BILLING_API_URL: str = os.getenv("BILLING_API_URL", "http://localhost:9000")
+
+DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./agent.db")

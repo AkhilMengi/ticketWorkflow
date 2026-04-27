@@ -6,4 +6,8 @@ suggestion_2:
   title: "Rebill the account"
   description: "Reprocess billing or apply credits/adjustments to customer account"
 
+suggestion_3:
+  title: "Reach to the customer support team"
+  description: "Reach to the team"
+
 

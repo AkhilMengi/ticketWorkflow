@@ -1,357 +1,168 @@
-from fastapi import APIRouter, HTTPException
-from app.api.schemas import (
-    CreateJobRequest, CreateJobResponse, JobStatusResponse, EventsResponse,
-    UpdateCaseRequest, UpdateCaseResponse, AddCommentRequest, AddCommentResponse,
-    CloseCaseRequest, CloseCaseResponse, LookupCasesRequest, LookupCasesResponse,
-    CreateContractRequest, CreateContractResponse, ContractStatusResponse, UpdateContractRequest, UpdateContractResponse,
-    ProcessRecommendedActionsResponse, ExecuteIntelligentActionsRequest
-)
-from app.services.job_service import create_job, get_job, get_events
-from app.workers.worker import enqueue_job, enqueue_contract_job
-from app.agent.memory import get_long_term_memory
-from app.agent.routing_graph import routing_graph
-from app.agent.routing_state import create_enhanced_state
-from app.integrations.salesforce import SalesforceClient
-import uuid
+"""
+FastAPI routes for the agentic issue-resolution workflow.
+
+Endpoints
+─────────
+POST /api/v1/resolve-issue          — run the full LangGraph agent, return JSON
+POST /api/v1/resolve-issue/stream   — same agent, stream progress via SSE
+GET  /api/v1/actions                — list supported action types
+"""
+import json
 import logging
+from typing import AsyncGenerator
+
+from fastapi import APIRouter, HTTPException
+from sse_starlette.sse import EventSourceResponse
+
+from app.api.schemas import IssueRequest, IssueResponse
+from app.agent.graph import agent_graph
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-@router.post("/jobs", response_model=CreateJobResponse)
-def create_agent_job(payload: CreateJobRequest):
-    job_id = create_job(payload.model_dump())
 
-    history = get_long_term_memory(payload.user_id)
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    initial_state = {
-        "job_id": job_id,
-        "user_id": payload.user_id,
-        "issue_type": payload.issue_type,
-        "message": payload.message or "",
-        "backend_context": {
-            "account_tier": "Pro",
-            "recent_errors": ["payment_timeout", "retry_failed"],
-            "history": history
-        },
-        "customer_profile": None,
-        "logs": None,
-        "summary": None,
-        "category": None,
-        "priority": None,
-        "next_action": None,
-        "final_answer": None,
-        "case_id": None,
-        "retries": 0,
-        "event_log": []
+def _build_initial_state(req: IssueRequest) -> dict:
+    return {
+        "account_id": req.account_id,
+        "issue_description": req.issue_description,
+        "account_details": {},
+        "issue_analysis": "",
+        "action_reasoning": "",
+        "recommended_actions": [],
+        "sf_case_payload": {},
+        "billing_payload": {},
+        "sf_case_result": None,
+        "billing_result": None,
+        "actions_executed": [],
+        "final_summary": "",
+        "error": None,
     }
 
-    enqueue_job(initial_state)
 
-    return CreateJobResponse(job_id=job_id, status="queued")
-
-@router.get("/jobs/{job_id}", response_model=JobStatusResponse)
-def get_job_status(job_id: str):
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    return JobStatusResponse(
-        job_id=job["job_id"],
-        status=job["status"],
-        result=job["result"]
-    )
-
-@router.get("/jobs/{job_id}/events", response_model=EventsResponse)
-def get_job_events(job_id: str):
-    return EventsResponse(job_id=job_id, events=get_events(job_id))
-
-@router.patch("/cases/{case_id}", response_model=UpdateCaseResponse)
-def update_case(case_id: str, payload: UpdateCaseRequest):
-    try:
-        sf_client = SalesforceClient()
-        result = sf_client.update_case(
-            case_id=payload.case_id,
-            subject=payload.subject,
-            description=payload.description,
-            status=payload.status,
-            priority=payload.priority,
-            agent_result=payload.agent_result
-        )
-        return UpdateCaseResponse(success=True, message=f"Case {case_id} updated successfully")
-    except Exception as e:
-        error_msg = str(e)
-        if "401" in error_msg or "invalid token" in error_msg.lower():
-            raise HTTPException(status_code=401, detail="Salesforce authentication failed")
-        elif "404" in error_msg or "not found" in error_msg.lower():
-            raise HTTPException(status_code=404, detail=f"Case {case_id} not found in Salesforce")
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to update case: {error_msg}")
-
-@router.post("/cases/{case_id}/comments", response_model=AddCommentResponse)
-def add_case_comment(case_id: str, payload: AddCommentRequest):
-    try:
-        sf_client = SalesforceClient()
-        result = sf_client.add_comment_to_case(
-            case_id=payload.case_id,
-            comment_text=payload.comment_text
-        )
-        comment_id = result.get("id", "unknown")
-        return AddCommentResponse(
-            comment_id=comment_id,
-            case_id=case_id,
-            message=f"Comment added to case {case_id}"
-        )
-    except Exception as e:
-        error_msg = str(e)
-        if "401" in error_msg or "invalid token" in error_msg.lower():
-            raise HTTPException(status_code=401, detail="Salesforce authentication failed")
-        elif "404" in error_msg or "not found" in error_msg.lower():
-            raise HTTPException(status_code=404, detail=f"Case {case_id} not found in Salesforce")
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to add comment: {error_msg}")
-
-@router.patch("/cases/{case_id}/close", response_model=CloseCaseResponse)
-def close_case(case_id: str, payload: CloseCaseRequest):
-    try:
-        sf_client = SalesforceClient()
-        result = sf_client.close_case(
-            case_id=payload.case_id,
-            subject=payload.subject,
-            summary=payload.summary,
-            resolution_notes=payload.resolution_notes
-        )
-        return CloseCaseResponse(
-            success=True,
-            case_id=case_id,
-            message=f"Case {case_id} closed successfully"
-        )
-    except Exception as e:
-        error_msg = str(e)
-        if "401" in error_msg or "invalid token" in error_msg.lower():
-            raise HTTPException(status_code=401, detail="Salesforce authentication failed")
-        elif "404" in error_msg or "not found" in error_msg.lower():
-            raise HTTPException(status_code=404, detail=f"Case {case_id} not found in Salesforce")
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to close case: {error_msg}")
-
-@router.post("/cases/lookup", response_model=LookupCasesResponse)
-def lookup_cases(payload: LookupCasesRequest):
-    try:
-        sf_client = SalesforceClient()
-        cases = sf_client.lookup_cases_by_user(payload.user_id, payload.status)
-        return LookupCasesResponse(
-            user_id=payload.user_id,
-            case_count=len(cases),
-            cases=[
-                {
-                    "id": case.get("Id"),
-                    "case_number": case.get("CaseNumber"),
-                    "subject": case.get("Subject"),
-                    "status": case.get("Status")
-                }
-                for case in cases
-            ]
-        )
-    except Exception as e:
-        error_msg = str(e)
-        if "401" in error_msg or "invalid token" in error_msg.lower():
-            raise HTTPException(status_code=401, detail="Salesforce authentication failed")
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to lookup cases: {error_msg}")
-
-
-# Contract endpoints
-@router.post("/contracts", response_model=CreateContractResponse)
-def create_contract_job(payload: CreateContractRequest):
-    """Create a new contract job for processing"""
-    job_id = create_job(payload.model_dump())
-    
-    history = get_long_term_memory(payload.user_id)
-    
-    initial_state = {
-        "job_id": job_id,
-        "user_id": payload.user_id,
-        "account_id": payload.account_id,
-        "tenant_name": payload.tenant_name,
-        "property_address": payload.property_address,
-        "move_in_date": payload.move_in_date,
-        "move_out_date": payload.move_out_date,
-        "rent_amount": payload.rent_amount,
-        "backend_context": {
-            "request_type": "contract_creation",
-            "history": history
-        },
-        "next_action": None,
-        "validation_status": None,
-        "validation_errors": [],
-        "contract_id": None,
-        "final_answer": None,
-        "retries": 0,
-        "event_log": []
-    }
-    
-    # Enqueue for contract processing
-    enqueue_contract_job(initial_state)
-    
-    return CreateContractResponse(job_id=job_id, status="queued")
-
-
-@router.get("/contracts/{job_id}", response_model=ContractStatusResponse)
-def get_contract_job_status(job_id: str):
-    """Get the status of a contract creation job"""
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Contract job not found")
-    
-    return ContractStatusResponse(
-        job_id=job["job_id"],
-        status=job["status"],
-        result=job["result"]
+def _state_to_response(state: dict) -> IssueResponse:
+    return IssueResponse(
+        account_id=state["account_id"],
+        issue_description=state["issue_description"],
+        issue_analysis=state.get("issue_analysis", ""),
+        action_reasoning=state.get("action_reasoning", ""),
+        recommended_actions=state.get("recommended_actions", []),
+        actions_executed=state.get("actions_executed", []),
+        sf_case_result=state.get("sf_case_result"),
+        billing_result=state.get("billing_result"),
+        final_summary=state.get("final_summary", ""),
+        error=state.get("error"),
     )
 
 
-@router.patch("/contracts/{contract_id}", response_model=UpdateContractResponse)
-def update_contract(contract_id: str, payload: UpdateContractRequest):
-    """Update an existing contract in Salesforce"""
+# ── POST /resolve-issue ───────────────────────────────────────────────────────
+
+@router.post(
+    "/resolve-issue",
+    response_model=IssueResponse,
+    summary="Resolve an account issue",
+    description=(
+        "Runs the LangGraph agentic workflow: fetches account context, "
+        "uses an LLM to analyse the issue and map it to business suggestions, "
+        "then creates a Salesforce case and/or calls the billing API as needed."
+    ),
+)
+async def resolve_issue(request: IssueRequest) -> IssueResponse:
+    logger.info(
+        "resolve-issue | account=%s | issue='%s'",
+        request.account_id,
+        request.issue_description[:80],
+    )
+
     try:
-        sf_client = SalesforceClient()
-        result = sf_client.update_contract(
-            contract_id=contract_id,
-            status=payload.status,
-            move_out_date=payload.move_out_date,
-            rent_amount=payload.rent_amount
-        )
-        return UpdateContractResponse(
-            success=True,
-            contract_id=contract_id,
-            message=f"Contract {contract_id} updated successfully"
-        )
-    except Exception as e:
-        error_msg = str(e)
-        if "401" in error_msg or "invalid token" in error_msg.lower():
-            raise HTTPException(status_code=401, detail="Salesforce authentication failed")
-        elif "404" in error_msg or "not found" in error_msg.lower():
-            raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found in Salesforce")
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to update contract: {error_msg}")
+        final_state = await agent_graph.ainvoke(_build_initial_state(request))
+        return _state_to_response(final_state)
+    except Exception as exc:
+        logger.error("Agent workflow error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Agent workflow failed: {exc}")
 
 
-@router.post("/intelligent-actions", response_model=ProcessRecommendedActionsResponse)
-def execute_intelligent_actions(payload: ExecuteIntelligentActionsRequest):
+# ── POST /resolve-issue/stream ────────────────────────────────────────────────
+
+@router.post(
+    "/resolve-issue/stream",
+    summary="Resolve an account issue (streaming SSE)",
+    description=(
+        "Same as /resolve-issue but streams progress events via Server-Sent Events "
+        "so a UI can show real-time agent steps."
+    ),
+)
+async def resolve_issue_stream(request: IssueRequest) -> EventSourceResponse:
     """
-    🤖 AI-POWERED ENDPOINT (LangGraph Integrated)
-    
-    This endpoint uses the routing graph to intelligently analyze issues and decide actions.
-    
-    The routing graph automatically:
-    1. Checks if intelligent routing is appropriate (file exists + description present)
-    2. Routes through intelligent_action_routing_node for AI analysis
-    3. Executes recommended actions via intelligent_actions_execution_node
-    4. Aggregates results with intelligent response formatting
-    
-    Workflow:
-    1. Receive issue description
-    2. Graph routes to intelligent routing
-    3. AI analyzes severity and type
-    4. AI recommends appropriate actions
-    5. Execute only recommended actions
-    6. Return results with AI analysis
-    
-    Request body:
-    {
-      "user_id": "customer_123",
-      "issue_description": "Customer's payment keeps failing, tried 3 times"
+    Emits SSE events for every completed graph node plus a final
+    'workflow_complete' event containing the full result.
+    """
+    TRACKED_NODES = {
+        "fetch_account": "Fetching account details",
+        "analyze_issue": "Analysing issue with LLM",
+        "execute_actions": "Executing actions (SF + Billing)",
+        "summarize": "Generating summary",
     }
-    """
-    try:
-        job_id = str(uuid.uuid4())
-        
-        logger.info(f"[INTELLIGENT_ACTIONS] Starting for user {payload.user_id}")
-        
-        # Create enhanced agent state with all required fields
-        initial_state = create_enhanced_state({
-            "job_id": job_id,
-            "user_id": payload.user_id,
-            "issue_type": "customer_support",
-            "message": payload.issue_description,
-            "backend_context": {
-                "source": "intelligent_actions_api",
-                "request_type": "ai_powered_routing"
+
+    async def event_generator() -> AsyncGenerator[dict, None]:
+        try:
+            async for event in agent_graph.astream_events(
+                _build_initial_state(request), version="v2"
+            ):
+                kind = event.get("event", "")
+                name = event.get("name", "")
+
+                # ── Emit progress when each tracked node finishes ──────────────
+                if kind == "on_chain_end" and name in TRACKED_NODES:
+                    output = event.get("data", {}).get("output", {})
+                    yield {
+                        "event": "node_complete",
+                        "data": json.dumps(
+                            {
+                                "node": name,
+                                "label": TRACKED_NODES[name],
+                                "output_keys": list(output.keys()) if isinstance(output, dict) else [],
+                            }
+                        ),
+                    }
+
+            # ── Re-invoke synchronously to get full final state ────────────────
+            # (astream_events doesn't expose the last cumulative state easily)
+            final_state = await agent_graph.ainvoke(_build_initial_state(request))
+            yield {
+                "event": "workflow_complete",
+                "data": _state_to_response(final_state).model_dump_json(),
+            }
+
+        except Exception as exc:
+            logger.error("Stream error: %s", exc, exc_info=True)
+            yield {
+                "event": "error",
+                "data": json.dumps({"detail": str(exc)}),
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+# ── GET /actions ──────────────────────────────────────────────────────────────
+
+@router.get(
+    "/actions",
+    summary="List supported agent actions",
+)
+async def list_actions():
+    return {
+        "supported_actions": [
+            {
+                "id": "create_sf_case",
+                "label": "Create Salesforce Case",
+                "description": "Opens a new support case in Salesforce for tracking and follow-up.",
             },
-            "customer_profile": None,
-            "logs": None,
-            "summary": None,
-            "category": None,
-            "priority": None,
-            "next_action": "routing",  # Skip enrichment, go straight to routing
-            "final_answer": None,
-            "case_id": None,
-            "retries": 0,
-            "event_log": []
-        })
-        
-        logger.info(f"[INTELLIGENT_ACTIONS] Initial state created with keys: {list(initial_state.keys())}")
-        
-        # Invoke the LangGraph routing graph
-        logger.info(f"[INTELLIGENT_ACTIONS] Invoking routing graph...")
-        result = routing_graph.invoke(initial_state)
-        
-        logger.info(f"[INTELLIGENT_ACTIONS] Graph result keys: {list(result.keys())}")
-        
-        # Extract aggregated response from graph result
-        aggregated_response = result.get("aggregated_response", {})
-        execution_summary = result.get("execution_summary", {})
-        intelligent_results = result.get("intelligent_action_results", [])
-        
-        logger.info(f"[INTELLIGENT_ACTIONS] Response summary: {execution_summary}")
-        
-        # Transform intelligent_results to ActionResult format
-        action_results = []
-        for action_result in intelligent_results:
-            action_type = action_result.get("action_type", "unknown")
-            status = action_result.get("status", "unknown")
-            details = action_result.get("details", {})
-            error = action_result.get("error")
-            
-            # Ensure result field has content
-            result_data = details if details else {"status": status}
-            if "action_type" not in result_data:
-                result_data["action_type"] = action_type
-            
-            action_results.append({
-                "action_type": action_type,
-                "status": status,
-                "result": result_data,
-                "error": error
-            })
-        
-        # Build API response
-        response_data = {
-            "job_id": job_id,
-            "user_id": payload.user_id,
-            "total_actions": execution_summary.get("total_actions", len(action_results)),
-            "results": action_results,
-            "summary": execution_summary
-        }
-        
-        logger.info(f"[INTELLIGENT_ACTIONS] Returning response with {len(action_results)} actions")
-        return ProcessRecommendedActionsResponse(**response_data)
-        
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=f"Error processing request: {str(e)}")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
-    except TypeError as e:
-        import traceback
-        tb = traceback.format_exc()
-        logger.error(f"TypeError in intelligent actions: {tb}")
-        raise HTTPException(status_code=500, detail=f"TypeError: {str(e)}")
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        logger.error(f"Full exception in intelligent actions: {tb}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to execute intelligent actions: {str(e)}"
-        )
+            {
+                "id": "call_billing_api",
+                "label": "Call Billing API",
+                "description": "Applies a credit, refund, rebill, or adjustment to the account.",
+            },
+        ]
+    }

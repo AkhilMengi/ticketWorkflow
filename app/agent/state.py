@@ -1,22 +1,29 @@
-from typing import TypedDict, Optional, Dict, Any, List
+from typing import TypedDict, Optional, List, Dict, Any
+
 
 class AgentState(TypedDict):
-    job_id: str
-    user_id: str
-    issue_type: str
-    message: str
-    backend_context: Dict[str, Any]
+    # ── Input ──────────────────────────────────────────────────────────────────
+    account_id: str
+    issue_description: str
 
-    customer_profile: Optional[Dict[str, Any]]
-    logs: Optional[List[str]]
+    # ── Fetched context ────────────────────────────────────────────────────────
+    account_details: Dict[str, Any]
 
-    summary: Optional[str]
-    category: Optional[str]
-    priority: Optional[str]
+    # ── LLM analysis ──────────────────────────────────────────────────────────
+    issue_analysis: str          # human-readable analysis written by LLM
+    action_reasoning: str        # LLM explanation of why it chose these actions
 
-    next_action: Optional[str]
-    final_answer: Optional[Dict[str, Any]]
+    # ── Decided actions & payloads ─────────────────────────────────────────────
+    # e.g. ["create_sf_case", "call_billing_api"]
+    recommended_actions: List[str]
+    sf_case_payload: Dict[str, Any]
+    billing_payload: Dict[str, Any]
 
-    case_id: Optional[str]
-    retries: int
-    event_log: List[Dict[str, Any]]
+    # ── Execution results ──────────────────────────────────────────────────────
+    sf_case_result: Optional[Dict[str, Any]]
+    billing_result: Optional[Dict[str, Any]]
+    actions_executed: List[str]
+
+    # ── Final output ───────────────────────────────────────────────────────────
+    final_summary: str
+    error: Optional[str]

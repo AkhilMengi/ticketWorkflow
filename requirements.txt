@@ -4,7 +4,10 @@ pydantic
 python-dotenv
 requests
 openai>=1.0.0
-langgraph
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langgraph>=0.1.0
 sqlalchemy
 tenacity
 sse-starlette
+pyyaml
