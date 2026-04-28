@@ -228,10 +228,11 @@ def summarize_node(state: AgentState) -> Dict[str, Any]:
     br = state.get("billing_result")
     if br:
         if br.get("success"):
+            task = br.get("billing_task", {})
             parts.append(
-                f"Billing Action: {br.get('action_type')} processed "
-                f"(txn={br.get('transaction_id')}, amount={br.get('amount')} "
-                f"{br.get('currency', 'USD')})"
+                f"Billing Action: {task.get('action_type')} processed "
+                f"(txn={task.get('transaction_id')}, amount={task.get('amount')} "
+                f"{task.get('currency', 'USD')}, reason={task.get('reason')})"
             )
         else:
             parts.append(f"Billing Action: FAILED – {br.get('error')}")

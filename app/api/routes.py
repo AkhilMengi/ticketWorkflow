@@ -14,8 +14,9 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.schemas import IssueRequest, IssueResponse
+from app.api.schemas import IssueRequest, IssueResponse, BillingTaskRequest, BillingTaskResponse
 from app.agent.graph import agent_graph
+from app.services.billing import call_billing_api, get_all_tasks, get_task_by_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -107,11 +108,17 @@ async def resolve_issue_stream(request: IssueRequest) -> EventSourceResponse:
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         try:
+            final_state = None
+
             async for event in agent_graph.astream_events(
                 _build_initial_state(request), version="v2"
             ):
                 kind = event.get("event", "")
                 name = event.get("name", "")
+
+                # ── Capture final cumulative state from the graph's own end event ──
+                if kind == "on_chain_end" and name == "LangGraph":
+                    final_state = event.get("data", {}).get("output", None)
 
                 # ── Emit progress when each tracked node finishes ──────────────
                 if kind == "on_chain_end" and name in TRACKED_NODES:
@@ -127,9 +134,12 @@ async def resolve_issue_stream(request: IssueRequest) -> EventSourceResponse:
                         ),
                     }
 
-            # ── Re-invoke synchronously to get full final state ────────────────
-            # (astream_events doesn't expose the last cumulative state easily)
-            final_state = await agent_graph.ainvoke(_build_initial_state(request))
+            # ── Emit final result using state captured from the stream ──────────
+            # Falls back to a single ainvoke only if the state wasn't captured
+            if final_state is None:
+                logger.warning("Final state not captured from stream — falling back to ainvoke")
+                final_state = await agent_graph.ainvoke(_build_initial_state(request))
+
             yield {
                 "event": "workflow_complete",
                 "data": _state_to_response(final_state).model_dump_json(),
@@ -143,6 +153,75 @@ async def resolve_issue_stream(request: IssueRequest) -> EventSourceResponse:
             }
 
     return EventSourceResponse(event_generator())
+
+# ── GET /billing-tasks ────────────────────────────────────────────────────────
+
+@router.get(
+    "/billing-tasks",
+    summary="List all billing tasks created this session",
+    description="Returns every billing task the agent or UI has created since the server started.",
+)
+async def list_billing_tasks():
+    tasks = get_all_tasks()
+    return {
+        "total": len(tasks),
+        "tasks": tasks,
+    }
+
+
+@router.get(
+    "/billing-tasks/{transaction_id}",
+    summary="Get a specific billing task by transaction ID",
+)
+async def get_billing_task(transaction_id: str):
+    task = get_task_by_id(transaction_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task '{transaction_id}' not found.")
+    return task
+
+# ── POST /billing-task ───────────────────────────────────────────────────────
+
+@router.post(
+    "/billing-task",
+    response_model=BillingTaskResponse,
+    summary="Create a billing task directly",
+    description=(
+        "Create a structured billing task and post it to the billing micro-service. "
+        "Can be called directly from the UI (bypassing the full agent) when the "
+        "action is already known. Returns the full task document including "
+        "transaction_id, account_id, change_suggested, action_type, amount, and "
+        "all other key components."
+    ),
+)
+async def create_billing_task(request: BillingTaskRequest) -> BillingTaskResponse:
+    logger.info(
+        "billing-task | account=%s action=%s amount=%s reason=%s",
+        request.account_id, request.action_type, request.amount, request.reason,
+    )
+
+    # Map the request into the billing service payload format
+    payload = {
+        "account_id":  request.account_id,
+        "action_type": request.action_type,
+        "amount":      request.amount,
+        "currency":    request.currency,
+        "reason":      request.reason,
+        "notes":       request.change_suggested + (f" | {request.notes}" if request.notes else ""),
+    }
+
+    result = call_billing_api(payload)
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("error", "Billing service failed"),
+        )
+
+    return BillingTaskResponse(
+        success=True,
+        message=result["message"],
+        billing_task=result["billing_task"],
+    )
 
 
 # ── GET /actions ──────────────────────────────────────────────────────────────
