@@ -10,22 +10,25 @@ Graph topology
     │
     ▼
   analyze_issue          ← LLM reads issue + suggestions → decides actions
+                            + rates confidence (0-10) in understanding
     │
     ▼ (conditional edge)
-    ├─ actions needed  ──► execute_actions  ← runs SF case + billing API
-    │                           │
-    │                           ▼
-    └─ no actions  ─────────► summarize     ← builds final response
-                                │
-                                ▼
-                              END
+    ├─ can understand (confidence >= 5)
+    │  ├─ actions needed  ──► execute_actions  ← runs SF case + billing API
+    │  │                           │
+    │  │                           ▼
+    │  └─ no actions needed ──► summarize     ← builds final response
+    │
+    └─ cannot understand (confidence < 5)
+       └─► summarize     ← responds "I am not able to understand the issue"
+                │
+                ▼
+              END
 
-Why conditional routing?
-  • If the LLM decides no action is needed (e.g. the issue is already resolved
-    or just informational) we skip straight to summarize, avoiding unnecessary
-    API calls.
-  • Otherwise, execute_actions handles any combination of SF case and/or
-    billing API in a single pass.
+Why confidence scoring?
+  • Prevents agent from making wrong API calls on unclear issues
+  • Forces clear decision-making: either understand the issue or admit it can't
+  • No guessing - if confidence < 5, respond with "I am not able to understand"
 """
 import logging
 from functools import lru_cache
@@ -48,16 +51,41 @@ logger = logging.getLogger(__name__)
 def _route_after_analysis(state: AgentState) -> str:
     """
     Decide the next node after the LLM has analysed the issue.
+    
+    NEW: Uses confidence score to determine if we should execute actions.
+    If confidence < 5, we route to summarize which will respond with
+    "I am not able to understand the issue".
 
     Returns:
-      "execute_actions" – one or more actions are queued
-      "summarize"       – nothing to execute (no-op or already resolved)
+      "execute_actions" – one or more actions are queued and confidence >= 5
+      "summarize"       – nothing to execute, or cannot understand the issue
     """
+    confidence = state.get("confidence_score", 5)
+    can_understand = state.get("can_understand_issue", True)
+    account_id = state.get("account_id", "unknown")
+    
+    # Check confidence first
+    if not can_understand:
+        logger.warning(
+            "Cannot understand issue for %s (confidence: %d/10) → summarizing with error message",
+            account_id,
+            confidence,
+        )
+        return "summarize"
+    
+    # If we can understand, check if actions are needed
     if state.get("recommended_actions"):
+        logger.info(
+            "Account %s: confidence %d/10 (can understand) → executing actions",
+            account_id,
+            confidence,
+        )
         return "execute_actions"
+    
     logger.info(
-        "No actions recommended for account %s — routing to summarize.",
-        state.get("account_id"),
+        "Account %s: confidence %d/10 (can understand) but no actions needed → summarizing",
+        account_id,
+        confidence,
     )
     return "summarize"
 

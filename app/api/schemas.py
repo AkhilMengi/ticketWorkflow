@@ -48,7 +48,7 @@ class BillingTaskRequest(BaseModel):
 class BillingTaskResponse(BaseModel):
     """Response returned from POST /billing-task."""
     success:      bool
-    message:      str
+    message:      Optional[str] = None
     billing_task: Optional[BillingTask] = None
     error:        Optional[str]         = None
 

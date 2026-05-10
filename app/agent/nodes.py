@@ -111,6 +111,10 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
     """
     LLM analyses the issue + account context + business suggestions and
     decides which system actions are required, generating exact payloads.
+    
+    NEW: LLM rates confidence (0-10) in understanding the issue.
+    If confidence < 5, agent will NOT recommend any actions and will 
+    respond with "I am not able to understand the issue".
     """
     logger.info("Analyzing issue for account %s with LLM…", state["account_id"])
 
@@ -127,34 +131,38 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
         result = _parse_llm_json(response.content)
     except json.JSONDecodeError as exc:
         logger.error("LLM returned invalid JSON: %s", exc)
-        # Safe fallback — always create a case when we can't parse the response
+        # Safe fallback — low confidence when we can't parse
         result = {
-            "analysis": "Unable to fully analyse the issue (LLM parse error).",
-            "reasoning": "Defaulting to case creation for human review.",
-            "recommended_actions": ["create_sf_case"],
-            "sf_case_payload": {
-                "subject": f"Issue for account {state['account_id']}",
-                "description": state["issue_description"],
-                "priority": "Medium",
-                "status": "New",
-                "origin": "Web",
-                "account_id": state["account_id"],
-            },
+            "confidence_score": 2,
+            "analysis": "I am not able to understand the issue",
+            "reasoning": "Failed to parse analysis response (technical error).",
+            "recommended_actions": [],
+            "sf_case_payload": {},
             "billing_payload": {},
         }
 
+    # Extract confidence score and check if we can understand the issue
+    confidence_score = result.get("confidence_score", 5)
+    can_understand = confidence_score >= 5
+    
     logger.info(
-        "LLM recommended actions: %s  |  analysis: %s",
-        result.get("recommended_actions", []),
-        result.get("analysis", "")[:120],
+        "Confidence: %d/10  |  Understanding: %s  |  Analysis: %s",
+        confidence_score,
+        "✓ Yes" if can_understand else "✗ No",
+        result.get("analysis", "")[:100],
     )
+
+    # If confidence is too low, don't recommend any actions
+    actions = result.get("recommended_actions", []) if can_understand else []
 
     return {
         "issue_analysis": result.get("analysis", ""),
         "action_reasoning": result.get("reasoning", ""),
-        "recommended_actions": result.get("recommended_actions", []),
-        "sf_case_payload": result.get("sf_case_payload", {}),
-        "billing_payload": result.get("billing_payload", {}),
+        "confidence_score": confidence_score,
+        "can_understand_issue": can_understand,
+        "recommended_actions": actions,
+        "sf_case_payload": result.get("sf_case_payload", {}) if can_understand else {},
+        "billing_payload": result.get("billing_payload", {}) if can_understand else {},
     }
 
 
@@ -199,6 +207,7 @@ def execute_actions_node(state: AgentState) -> Dict[str, Any]:
         "sf_case_result": sf_result,
         "billing_result": billing_result,
         "actions_executed": actions_executed,
+        "confidence_score": state.get("confidence_score", 0),
     }
 
 
@@ -207,7 +216,23 @@ def execute_actions_node(state: AgentState) -> Dict[str, Any]:
 def summarize_node(state: AgentState) -> Dict[str, Any]:
     """
     Compile a human-readable summary of everything the agent did.
+    
+    NEW: Handles both successful cases and cases where agent can't understand the issue.
     """
+    # Check if we could understand the issue
+    if not state.get("can_understand_issue", True):
+        # Clear "I am not able to understand" message
+        final_summary = (
+            f"❌ {state.get('issue_analysis', 'I am not able to understand the issue')}\n\n"
+            f"Reason: {state.get('action_reasoning', 'Insufficient information to determine the issue.')}\n\n"
+            f"Please provide more details to help us better:"
+        )
+        return {
+            "final_summary": final_summary,
+            "confidence_score": state.get("confidence_score", 0),
+        }
+    
+    # Normal successful case
     parts = [
         f"Analysis: {state.get('issue_analysis', 'N/A')}",
         f"Reasoning: {state.get('action_reasoning', 'N/A')}",
@@ -237,4 +262,7 @@ def summarize_node(state: AgentState) -> Dict[str, Any]:
         else:
             parts.append(f"Billing Action: FAILED – {br.get('error')}")
 
-    return {"final_summary": " | ".join(parts)}
+    return {
+        "final_summary": " | ".join(parts),
+        "confidence_score": state.get("confidence_score", 0),
+    }

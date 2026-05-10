@@ -6,9 +6,13 @@ Endpoints
 POST /api/v1/resolve-issue          — run the full LangGraph agent, return JSON
 POST /api/v1/resolve-issue/stream   — same agent, stream progress via SSE
 GET  /api/v1/actions                — list supported action types
+GET  /api/v1/traces                 — get agent execution traces (Mock LangSmith)
+GET  /api/v1/traces/metrics         — get aggregate metrics
 """
 import json
 import logging
+import time
+from datetime import datetime
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
@@ -16,6 +20,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.api.schemas import IssueRequest, IssueResponse, BillingTaskRequest, BillingTaskResponse
 from app.agent.graph import agent_graph
+from app.agent.tracing import AgentTrace
 from app.services.billing import call_billing_api, get_all_tasks, get_task_by_id
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,8 @@ def _build_initial_state(req: IssueRequest) -> dict:
         "account_details": {},
         "issue_analysis": "",
         "action_reasoning": "",
+        "confidence_score": 0,
+        "can_understand_issue": True,
         "recommended_actions": [],
         "sf_case_payload": {},
         "billing_payload": {},
@@ -77,7 +84,25 @@ async def resolve_issue(request: IssueRequest) -> IssueResponse:
     )
 
     try:
+        start_time = time.time()
         final_state = await agent_graph.ainvoke(_build_initial_state(request))
+        duration = time.time() - start_time
+        
+        # Record trace for dashboard
+        AgentTrace.record_execution(
+            account_id=final_state.get("account_id", ""),
+            issue_description=final_state.get("issue_description", ""),
+            confidence_score=final_state.get("confidence_score", 0),
+            issue_analysis=final_state.get("issue_analysis", ""),
+            recommended_actions=final_state.get("recommended_actions", []),
+            actions_executed=final_state.get("actions_executed", []),
+            final_summary=final_state.get("final_summary", ""),
+            duration_seconds=duration,
+            sf_case_result=final_state.get("sf_case_result"),
+            billing_result=final_state.get("billing_result"),
+            error=final_state.get("error"),
+        )
+        
         return _state_to_response(final_state)
     except Exception as exc:
         logger.error("Agent workflow error: %s", exc, exc_info=True)
@@ -139,6 +164,21 @@ async def resolve_issue_stream(request: IssueRequest) -> EventSourceResponse:
             if final_state is None:
                 logger.warning("Final state not captured from stream — falling back to ainvoke")
                 final_state = await agent_graph.ainvoke(_build_initial_state(request))
+
+            # Record trace for dashboard (same as /resolve-issue endpoint)
+            AgentTrace.record_execution(
+                account_id=final_state.get("account_id", ""),
+                issue_description=final_state.get("issue_description", ""),
+                confidence_score=final_state.get("confidence_score", 0),
+                issue_analysis=final_state.get("issue_analysis", ""),
+                recommended_actions=final_state.get("recommended_actions", []),
+                actions_executed=final_state.get("actions_executed", []),
+                final_summary=final_state.get("final_summary", ""),
+                duration_seconds=0,  # stream doesn't track duration, set to 0
+                sf_case_result=final_state.get("sf_case_result"),
+                billing_result=final_state.get("billing_result"),
+                error=final_state.get("error"),
+            )
 
             yield {
                 "event": "workflow_complete",
@@ -244,4 +284,38 @@ async def list_actions():
                 "description": "Applies a credit, refund, rebill, or adjustment to the account.",
             },
         ]
+    }
+
+
+# ── GET /traces (Mock LangSmith) ──────────────────────────────────────────────
+
+@router.get(
+    "/traces",
+    summary="Get all agent execution traces (Mock LangSmith Dashboard)",
+    description="Returns all agent execution traces for visualization and debugging.",
+)
+async def get_traces(account_id: str = None, limit: int = 100):
+    """Retrieve execution traces for the dashboard."""
+    if account_id:
+        traces = AgentTrace.get_traces_by_account(account_id)
+    else:
+        traces = AgentTrace.get_all_traces(limit)
+    
+    return {
+        "total": len(traces),
+        "traces": traces,
+    }
+
+
+@router.get(
+    "/traces/metrics",
+    summary="Get aggregate metrics (Mock LangSmith Metrics)",
+    description="Returns metrics about agent performance and decisions.",
+)
+async def get_traces_metrics():
+    """Get metrics from all traces."""
+    metrics = AgentTrace.get_metrics()
+    return {
+        "metrics": metrics,
+        "timestamp": datetime.utcnow().isoformat(),
     }

@@ -52,26 +52,53 @@ You have exactly two actions available. Choose one, both, or neither.
     • "rebill"     → re-attempt a charge that failed or was missed
     • "adjustment" → generic balance correction (use when none above fit)
 
+━━━━━━━━━━━━━━━━━━  CONFIDENCE SCORING  ━━━━━━━━━━━━━━━━━━━━━━━━
+RATE your confidence (0-10) in understanding this issue:
+
+  9-10: Crystal clear. Customer explicitly states the problem with specific details.
+        Example: "I was charged $99 twice on April 1st (TXN-123 and TXN-124)"
+  
+  6-8:  Pretty clear. Enough information to make a confident decision.
+        Example: "My credit card wasn't charged on the billing date this month"
+  
+  4-5:  Unclear. Missing critical details or ambiguous problem description.
+        Example: "Something is wrong with my account" (no specific issue)
+  
+  0-3:  Cannot understand. Issue is too vague or contradictory.
+        Example: "Help me" (no context whatsoever)
+
+⚠️  CRITICAL: If your confidence < 5, set recommended_actions to [] and return
+    the "I am not able to understand" message. Do NOT guess or make assumptions
+    that could lead to wrong API calls.
+
 ━━━━━━━━━━━━━━━━━━  DECISION RULES  ━━━━━━━━━━━━━━━━━━━━━━━━
 Follow this logic strictly:
 
-  • "Check customer details" suggestion
-      → No financial change needed.
-      → Use create_sf_case ONLY if the issue warrants tracking.
-      → Do NOT call the billing API.
+  • IF confidence < 5
+      → Set recommended_actions = []
+      → Set analysis = "I am not able to understand the issue"
+      → Set reasoning = "<specific missing information or ambiguity>"
+      → Do NOT recommend any actions
 
-  • "Rebill the account" suggestion
-      → Always call_billing_api (action_type = rebill | credit | refund).
-      → Also create_sf_case if the amount is significant or disputed.
+  • ELSE (confidence >= 5) - apply these rules:
 
-  • "Close the case" suggestion
-      → Use create_sf_case to formally log and close the issue.
-      → Add call_billing_api only if a financial correction is also required.
+    • "Check customer details" suggestion
+        → No financial change needed.
+        → Use create_sf_case ONLY if the issue warrants tracking.
+        → Do NOT call the billing API.
 
-  • Issue is purely informational with no action needed
-      → Set recommended_actions to [].
+    • "Rebill the account" suggestion
+        → Always call_billing_api (action_type = rebill | credit | refund).
+        → Also create_sf_case if the amount is significant or disputed.
 
-  • When in doubt, prefer creating a case over doing nothing.
+    • "Close the case" suggestion
+        → Use create_sf_case to formally log and close the issue.
+        → Add call_billing_api only if a financial correction is also required.
+
+    • Issue is purely informational with no action needed
+        → Set recommended_actions to [].
+
+    • When in doubt, prefer creating a case over doing nothing.
 
 ━━━━━━━━━━━━━━━━━━  PAYLOAD QUALITY RULES  ━━━━━━━━━━━━━━━━━━
   • sf_case subject  : ≤ 80 chars, specific (e.g. "Double charge – $99 – ACC-1001")
@@ -84,8 +111,9 @@ Follow this logic strictly:
 Respond with VALID JSON ONLY. No markdown, no extra text, no explanation outside the JSON.
 
 {{
-  "analysis": "<2-4 sentences: what happened, why it matters, account impact>",
-  "reasoning": "<explain which suggestion(s) matched and why each action was chosen>",
+  "confidence_score": 8,
+  "analysis": "<2-4 sentences: what happened, why it matters, account impact. OR if confidence<5: 'I am not able to understand the issue'>",
+  "reasoning": "<explain which suggestion(s) matched and why each action was chosen. OR if confidence<5: 'specific missing information or why it's too vague'>",
   "recommended_actions": ["create_sf_case", "call_billing_api"],
   "sf_case_payload": {{
     "subject": "<specific subject ≤ 80 chars>",

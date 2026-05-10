@@ -12,7 +12,8 @@ class AgentState(TypedDict):
     # ── LLM analysis ──────────────────────────────────────────────────────────
     issue_analysis: str          # human-readable analysis written by LLM
     action_reasoning: str        # LLM explanation of why it chose these actions
-
+    confidence_score: int        # LLM confidence level 0-10 in understanding the issue
+    can_understand_issue: bool   # True if confidence >= 5, False otherwise
     # ── Decided actions & payloads ─────────────────────────────────────────────
     # e.g. ["create_sf_case", "call_billing_api"]
     recommended_actions: List[str]
