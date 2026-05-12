@@ -21,7 +21,13 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.state import AgentState
 from app.agent.prompts import ANALYZE_ISSUE_PROMPT
-from app.services.salesforce import create_sf_case
+from app.agent.api_validator import validate_action_entities
+from app.services.salesforce import (
+    create_sf_case,
+    add_comment_to_case,
+    close_case,
+    edit_case,
+)
 from app.services.billing import call_billing_api
 from app.config import OPENAI_API_KEY
 
@@ -82,10 +88,10 @@ def _parse_llm_json(content: str) -> Dict[str, Any]:
 def fetch_account_node(state: AgentState) -> Dict[str, Any]:
     """
     Retrieve account details from CRM / database.
-    This mock returns realistic data; replace with a real DB/API call.
+    Also fetches recent open cases from Salesforce.
     """
     account_id = state["account_id"]
-    logger.info("Fetching account details for %s", account_id)
+    logger.info("Fetching account details and recent cases for %s", account_id)
 
     # TODO: replace with actual CRM / DB lookup
     account_details: Dict[str, Any] = {
@@ -101,6 +107,30 @@ def fetch_account_node(state: AgentState) -> Dict[str, Any]:
         "open_tickets": 0,
         "account_age_months": 18,
     }
+
+    # Fetch recent open cases from Salesforce
+    from app.services.salesforce import fetch_recent_cases
+    
+    cases_result = fetch_recent_cases(account_id, limit=5)
+    if cases_result.get("success"):
+        # Transform cases to make field names crystal clear for LLM
+        recent_cases = []
+        for case in cases_result.get("cases", []):
+            recent_cases.append({
+                "case_id": case.get("id"),              # ← Use this for API calls (18-char ID)
+                "case_number": case.get("case_number"), # ← This is for display only
+                "subject": case.get("subject"),
+                "description": case.get("description"),
+                "priority": case.get("priority"),
+                "status": case.get("status"),
+                "created_date": case.get("created_date"),
+                "last_modified_date": case.get("last_modified_date"),
+            })
+        account_details["recent_open_cases"] = recent_cases
+        logger.info("✅ Fetched %d recent cases for %s", len(recent_cases), account_id)
+    else:
+        logger.warning("⚠️  Could not fetch recent cases: %s", cases_result.get("error", "Unknown error"))
+        account_details["recent_open_cases"] = []
 
     return {"account_details": account_details}
 
@@ -163,6 +193,9 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
         "recommended_actions": actions,
         "sf_case_payload": result.get("sf_case_payload", {}) if can_understand else {},
         "billing_payload": result.get("billing_payload", {}) if can_understand else {},
+        "add_comment_payload": result.get("add_comment_payload", {}) if can_understand else {},
+        "close_case_payload": result.get("close_case_payload", {}) if can_understand else {},
+        "edit_case_payload": result.get("edit_case_payload", {}) if can_understand else {},
     }
 
 
@@ -170,45 +203,177 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
 
 def execute_actions_node(state: AgentState) -> Dict[str, Any]:
     """
-    Execute every action the LLM recommended.
+    Execute every action the LLM recommended using a clean dispatcher pattern.
 
-    Supports:
-      • create_sf_case   → calls Salesforce REST API
-      • call_billing_api → calls billing micro-service
+    Supported actions:
+      • create_sf_case        → creates new Salesforce case
+      • add_comment_to_case   → appends comment to existing case
+      • close_case            → marks case as closed
+      • edit_case             → updates case fields (Priority, Subject, etc.)
+      • call_billing_api      → executes billing operations (refund, credit, etc.)
 
-    Both can run in the same pass if the LLM selected both.
+    The dispatcher validates required entities for each action before execution.
     """
     recommended = state.get("recommended_actions", [])
     logger.info("Executing actions: %s", recommended)
 
+    # Initialize result containers
+    results = {
+        "sf_case_result": None,
+        "add_comment_result": None,
+        "close_case_result": None,
+        "edit_case_result": None,
+        "billing_result": None,
+    }
     actions_executed = []
-    sf_result = None
-    billing_result = None
 
-    if "create_sf_case" in recommended:
-        logger.info("Creating Salesforce case…")
-        sf_result = create_sf_case(state.get("sf_case_payload", {}))
-        if sf_result.get("success"):
-            actions_executed.append("create_sf_case")
-            logger.info("SF case created: id=%s", sf_result.get("id"))
-        else:
-            logger.warning("SF case creation failed: %s", sf_result.get("error"))
-
-    if "call_billing_api" in recommended:
-        logger.info("Calling billing API…")
-        billing_result = call_billing_api(state.get("billing_payload", {}))
-        if billing_result.get("success"):
-            actions_executed.append("call_billing_api")
-            logger.info("Billing txn: %s", billing_result.get("transaction_id"))
-        else:
-            logger.warning("Billing API failed: %s", billing_result.get("error"))
+    # ── Action Dispatcher ──────────────────────────────────────────────────────
+    
+    for action in recommended:
+        try:
+            if action == "create_sf_case":
+                results["sf_case_result"] = _execute_create_sf_case(state)
+                if results["sf_case_result"].get("success"):
+                    actions_executed.append(action)
+            
+            elif action == "add_comment_to_case":
+                results["add_comment_result"] = _execute_add_comment(state)
+                if results["add_comment_result"].get("success"):
+                    actions_executed.append(action)
+            
+            elif action == "close_case":
+                results["close_case_result"] = _execute_close_case(state)
+                if results["close_case_result"].get("success"):
+                    actions_executed.append(action)
+            
+            elif action == "edit_case":
+                results["edit_case_result"] = _execute_edit_case(state)
+                if results["edit_case_result"].get("success"):
+                    actions_executed.append(action)
+            
+            elif action == "call_billing_api":
+                results["billing_result"] = _execute_billing_api(state)
+                if results["billing_result"].get("success"):
+                    actions_executed.append(action)
+            
+            else:
+                logger.warning(f"Unknown action: {action}")
+        
+        except Exception as exc:
+            logger.error(f"Error executing action '{action}': {exc}", exc_info=True)
 
     return {
-        "sf_case_result": sf_result,
-        "billing_result": billing_result,
+        **results,
         "actions_executed": actions_executed,
         "confidence_score": state.get("confidence_score", 0),
     }
+
+
+# ── Action Executors (Internal) ────────────────────────────────────────────────
+
+def _execute_create_sf_case(state: AgentState) -> Dict[str, Any]:
+    """Execute create_sf_case action."""
+    logger.info("Creating Salesforce case…")
+    payload = state.get("sf_case_payload", {})
+    
+    if not payload:
+        return {"success": False, "error": "sf_case_payload is empty"}
+    
+    result = create_sf_case(payload)
+    if result.get("success"):
+        logger.info("SF case created: id=%s", result.get("id"))
+    else:
+        logger.warning("SF case creation failed: %s", result.get("error"))
+    
+    return result
+
+
+def _execute_add_comment(state: AgentState) -> Dict[str, Any]:
+    """Execute add_comment_to_case action with validation."""
+    logger.info("Adding comment to case…")
+    payload = state.get("add_comment_payload", {})
+    
+    if not payload:
+        return {"success": False, "error": "add_comment_payload is empty"}
+    
+    # Validate required entities
+    is_valid, error_msg = validate_action_entities("add_comment_to_case", payload)
+    if not is_valid:
+        logger.warning(f"add_comment_to_case validation failed: {error_msg}")
+        return {"success": False, "error": error_msg}
+    
+    result = add_comment_to_case(payload)
+    if result.get("success"):
+        logger.info("Comment added: case_id=%s, comment_id=%s", 
+                   payload.get("case_id"), result.get("comment_id"))
+    else:
+        logger.warning("Add comment failed: %s", result.get("error"))
+    
+    return result
+
+
+def _execute_close_case(state: AgentState) -> Dict[str, Any]:
+    """Execute close_case action with validation."""
+    logger.info("Closing case…")
+    payload = state.get("close_case_payload", {})
+    
+    if not payload:
+        return {"success": False, "error": "close_case_payload is empty"}
+    
+    # Validate required entities
+    is_valid, error_msg = validate_action_entities("close_case", payload)
+    if not is_valid:
+        logger.warning(f"close_case validation failed: {error_msg}")
+        return {"success": False, "error": error_msg}
+    
+    result = close_case(payload)
+    if result.get("success"):
+        logger.info("Case closed: case_id=%s", payload.get("case_id"))
+    else:
+        logger.warning("Close case failed: %s", result.get("error"))
+    
+    return result
+
+
+def _execute_edit_case(state: AgentState) -> Dict[str, Any]:
+    """Execute edit_case action with validation."""
+    logger.info("Editing case…")
+    payload = state.get("edit_case_payload", {})
+    
+    if not payload:
+        return {"success": False, "error": "edit_case_payload is empty"}
+    
+    # Validate required entities
+    is_valid, error_msg = validate_action_entities("edit_case", payload)
+    if not is_valid:
+        logger.warning(f"edit_case validation failed: {error_msg}")
+        return {"success": False, "error": error_msg}
+    
+    result = edit_case(payload)
+    if result.get("success"):
+        logger.info("Case edited: case_id=%s, fields=%s", 
+                   payload.get("case_id"), result.get("updated_fields", []))
+    else:
+        logger.warning("Edit case failed: %s", result.get("error"))
+    
+    return result
+
+
+def _execute_billing_api(state: AgentState) -> Dict[str, Any]:
+    """Execute call_billing_api action."""
+    logger.info("Calling billing API…")
+    payload = state.get("billing_payload", {})
+    
+    if not payload:
+        return {"success": False, "error": "billing_payload is empty"}
+    
+    result = call_billing_api(payload)
+    if result.get("success"):
+        logger.info("Billing txn: %s", result.get("transaction_id"))
+    else:
+        logger.warning("Billing API failed: %s", result.get("error"))
+    
+    return result
 
 
 # ── Node 4: summarize_node ────────────────────────────────────────────────────
@@ -217,7 +382,7 @@ def summarize_node(state: AgentState) -> Dict[str, Any]:
     """
     Compile a human-readable summary of everything the agent did.
     
-    NEW: Handles both successful cases and cases where agent can't understand the issue.
+    Handles both successful cases and cases where agent can't understand the issue.
     """
     # Check if we could understand the issue
     if not state.get("can_understand_issue", True):
@@ -249,6 +414,34 @@ def summarize_node(state: AgentState) -> Dict[str, Any]:
             )
         else:
             parts.append(f"Salesforce Case: FAILED – {sf.get('error')}")
+
+    ac = state.get("add_comment_result")
+    if ac:
+        if ac.get("success"):
+            parts.append(
+                f"Add Comment: posted to case {ac.get('case_id')} "
+                f"(comment_id={ac.get('comment_id')})"
+            )
+        else:
+            parts.append(f"Add Comment: FAILED – {ac.get('error')}")
+
+    cc = state.get("close_case_result")
+    if cc:
+        if cc.get("success"):
+            parts.append(f"Close Case: case {cc.get('case_id')} marked as Closed")
+        else:
+            parts.append(f"Close Case: FAILED – {cc.get('error')}")
+
+    ec = state.get("edit_case_result")
+    if ec:
+        if ec.get("success"):
+            fields_updated = ', '.join(ec.get('updated_fields', []))
+            parts.append(
+                f"Edit Case: case {ec.get('case_id')} updated with fields "
+                f"[{fields_updated}]"
+            )
+        else:
+            parts.append(f"Edit Case: FAILED – {ec.get('error')}")
 
     br = state.get("billing_result")
     if br:
