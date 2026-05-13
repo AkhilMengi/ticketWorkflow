@@ -75,15 +75,6 @@ class IssueResponse(BaseModel):
     sf_case_result: Optional[Dict[str, Any]] = Field(
         None, description="Salesforce case creation result"
     )
-    add_comment_result: Optional[Dict[str, Any]] = Field(
-        None, description="Add comment to case result"
-    )
-    close_case_result: Optional[Dict[str, Any]] = Field(
-        None, description="Close case result"
-    )
-    edit_case_result: Optional[Dict[str, Any]] = Field(
-        None, description="Edit case result"
-    )
     billing_result: Optional[BillingTaskResponse] = Field(
         None, description="Billing task creation result including full task detail"
     )

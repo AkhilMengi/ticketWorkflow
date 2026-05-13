@@ -8,16 +8,6 @@ suggestion_2:
 
 suggestion_3:
   title: "Reach to the customer support team"
-  description: "Escalate the issue to the support team for manual intervention"
-
-suggestion_4:
-  title: "Update case priority"
-  description: "If the issue is urgent or critical, mark the case as High priority in Salesforce"
-
-suggestion_5:
-  title: "close complaint"
-  description: "Close the case"
-
-
+  description: "Reach to the team"
 
 
