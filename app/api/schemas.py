@@ -26,6 +26,7 @@ class BillingTask(BaseModel):
     currency:         str   = Field(description="ISO currency code e.g. USD")
     notes:            str   = Field(description="Full context notes")
     initiated_by:     str   = Field(description="Who triggered this task (intelligent-agent)")
+    initiated_for:    str   = Field(description="What this task was initiated for (e.g., refund, meter-update, configuration-change)")
     created_at:       str   = Field(description="ISO 8601 UTC timestamp")
     status:           str   = Field(description="pending | processed | failed")
 
@@ -37,6 +38,7 @@ class BillingTaskRequest(BaseModel):
     amount:           float = Field(..., example=99.0)
     currency:         str   = Field(default="USD", example="USD")
     reason:           str   = Field(..., example="DUPLICATE_CHARGE", description="Short reason code")
+    initiated_for:    str   = Field(default="", example="refund", description="What this action is for (e.g., refund, meter-update, config-change)")
     change_suggested: str   = Field(
         ...,
         example="Customer was double charged. Issue a full refund of $99.",

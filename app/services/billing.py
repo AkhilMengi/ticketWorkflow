@@ -64,6 +64,7 @@ def _build_task_payload(payload: Dict[str, Any], transaction_id: str) -> Dict[st
         # ── Context ───────────────────────────────────────────────────────────
         "notes":             payload.get("notes", ""),
         "initiated_by":      "intelligent-agent",
+        "initiated_for":     payload.get("initiated_for", ""),
         "created_at":        datetime.now(timezone.utc).isoformat(),
         "status":            "pending",
     }

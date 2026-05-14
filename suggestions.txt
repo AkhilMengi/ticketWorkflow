@@ -1,13 +1,19 @@
 suggestion_1:
-  title: "Check customer details"
-  description: "Verify customer account information and payment history"
+  title: "Confirm Smart Meter Status"
+  description: "Check for billing exceptions, reading gaps"
 
 suggestion_2:
-  title: "Rebill the account"
-  description: "Reprocess billing or apply credits/adjustments to customer account"
+  title: "Check the tariff details of the customer"
+  description: "Check the meter configuration"
 
 suggestion_3:
-  title: "Reach to the customer support team"
-  description: "Reach to the team"
+  title: "Send D367 to change the meter configuration"
+  description: "Validate whether the meter configuration are aligned"
+
+suggestion_4:
+  title: "Update meter configuration"
+  description: "Update meter configuration from PAYG to 2Rate credit meter"
+
+
 
 
