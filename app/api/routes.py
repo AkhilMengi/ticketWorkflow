@@ -5,6 +5,7 @@ Endpoints
 ─────────
 POST /api/v1/resolve-issue          — run the full LangGraph agent, return JSON
 POST /api/v1/resolve-issue/stream   — same agent, stream progress via SSE
+POST /api/v1/update-sheet           — update Excel/Sheet value (button-triggered)
 GET  /api/v1/actions                — list supported action types
 GET  /api/v1/traces                 — get agent execution traces (Mock LangSmith)
 GET  /api/v1/traces/metrics         — get aggregate metrics
@@ -18,10 +19,11 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.schemas import IssueRequest, IssueResponse, BillingTaskRequest, BillingTaskResponse
+from app.api.schemas import IssueRequest, IssueResponse, BillingTaskRequest, BillingTaskResponse, SheetUpdateRequest, SheetUpdateResponse
 from app.agent.graph import agent_graph
 from app.agent.tracing import AgentTrace
 from app.services.billing import call_billing_api, get_all_tasks, get_task_by_id
+from app.services.sheet import update_sheet
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,9 +42,9 @@ def _build_initial_state(req: IssueRequest) -> dict:
         "can_understand_issue": True,
         "recommended_actions": [],
         "sf_case_payload": {},
-        "billing_payload": {},
+        "billing_payloads": [],
         "sf_case_result": None,
-        "billing_result": None,
+        "billing_results": None,
         "actions_executed": [],
         "final_summary": "",
         "error": None,
@@ -263,6 +265,54 @@ async def create_billing_task(request: BillingTaskRequest) -> BillingTaskRespons
         billing_task=result["billing_task"],
     )
 
+# ── POST /update-sheet ────────────────────────────────────────────────────────
+
+@router.post(
+    "/update-sheet",
+    response_model=SheetUpdateResponse,
+    summary="Update an Excel/Sheet cell (button-triggered)",
+    description=(
+        "Simple button-triggered endpoint to update a single cell in an Excel sheet "
+        "via the external Sheet API. Used for quick updates without full agent workflow."
+    ),
+)
+async def update_sheet_endpoint(request: SheetUpdateRequest) -> SheetUpdateResponse:
+    logger.info(
+        "update-sheet | account=%s | field=%s | value=%s",
+        request.account_id,
+        request.field_name,
+        request.field_value,
+    )
+
+    try:
+        payload = {
+            "account_id": request.account_id,
+            "field_name": request.field_name,
+            "field_value": request.field_value,
+            "context": request.context or "",
+        }
+        
+        result = update_sheet(payload)
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=502,
+                detail=result.get("error", "Sheet service failed"),
+            )
+        
+        return SheetUpdateResponse(
+            success=True,
+            message=result.get("message", "Sheet updated successfully"),
+            error=None,
+            updated_at=result.get("updated_at"),
+            previous_value=result.get("previous_value"),
+            new_value=result.get("new_value"),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Sheet update error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Sheet update failed: {exc}")
 
 # ── GET /actions ──────────────────────────────────────────────────────────────
 

@@ -18,11 +18,11 @@ class AgentState(TypedDict):
     # e.g. ["create_sf_case", "call_billing_api"]
     recommended_actions: List[str]
     sf_case_payload: Dict[str, Any]
-    billing_payload: Dict[str, Any]
+    billing_payloads: List[Dict[str, Any]]  # Array of payloads (one per matching suggestion)
 
     # ── Execution results ──────────────────────────────────────────────────────
     sf_case_result: Optional[Dict[str, Any]]
-    billing_result: Optional[Dict[str, Any]]
+    billing_results: Optional[List[Dict[str, Any]]]  # Array of results
     actions_executed: List[str]
 
     # ── Final output ───────────────────────────────────────────────────────────

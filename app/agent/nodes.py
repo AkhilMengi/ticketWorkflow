@@ -45,26 +45,47 @@ def _get_llm() -> ChatOpenAI:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _load_suggestions() -> str:
-    """Load business suggestions from suggestions.txt (YAML format)."""
+def _load_suggestions() -> tuple[str, Dict[str, Any]]:
+    """Load business suggestions from suggestions.txt (YAML format).
+    
+    Returns:
+        Tuple of (formatted_string, raw_data_dict) 
+        formatted_string: for display in prompt
+        raw_data_dict: for metadata lookup when generating payloads
+    """
     try:
         with open("suggestions.txt", "r") as fh:
             data = yaml.safe_load(fh.read())
+        
         lines = []
-        for value in data.values():
+        for suggestion_key, value in data.items():
             title = value.get("title", "")
             desc = value.get("description", "")
             lines.append(f"  • {title}: {desc}")
+            
+            # Add optional metadata hint if present
+            optional_fields = []
+            if "action_type" in value:
+                optional_fields.append(f"action_type={value['action_type']}")
+            if "reason" in value:
+                optional_fields.append(f"reason={value['reason']}")
+            if "notes" in value:
+                optional_fields.append(f"notes={value['notes'][:50]}...")
+            
+            if optional_fields:
+                lines.append(f"    ({', '.join(optional_fields)})")
+        
         result = "\n".join(lines)
         logger.info("✅ suggestions.txt loaded (%d suggestions):\n%s", len(data), result)
-        return result
+        return result, data
     except Exception as exc:
         logger.warning("⚠️  Could not load suggestions.txt: %s", exc)
-        return (
+        default_str = (
             "  • Check customer details: Verify account information and payment history.\n"
             "  • Rebill the account: Reprocess billing or apply credits/adjustments.\n"
             "  • Close the case: Mark the issue as resolved."
         )
+        return default_str, {}
 
 
 def _parse_llm_json(content: str) -> Dict[str, Any]:
@@ -118,12 +139,12 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
     """
     logger.info("Analyzing issue for account %s with LLM…", state["account_id"])
 
-    suggestions = _load_suggestions()
+    suggestions_str, suggestions_data = _load_suggestions()
     prompt = ANALYZE_ISSUE_PROMPT.format(
         account_id=state["account_id"],
         account_details=json.dumps(state["account_details"], indent=2),
         issue_description=state["issue_description"],
-        suggestions=suggestions,
+        suggestions=suggestions_str,
     )
 
     try:
@@ -138,7 +159,7 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
             "reasoning": "Failed to parse analysis response (technical error).",
             "recommended_actions": [],
             "sf_case_payload": {},
-            "billing_payload": {},
+            "billing_payloads": [],
         }
 
     # Extract confidence score and check if we can understand the issue
@@ -162,7 +183,7 @@ def analyze_issue_node(state: AgentState) -> Dict[str, Any]:
         "can_understand_issue": can_understand,
         "recommended_actions": actions,
         "sf_case_payload": result.get("sf_case_payload", {}) if can_understand else {},
-        "billing_payload": result.get("billing_payload", {}) if can_understand else {},
+        "billing_payloads": result.get("billing_payloads", []) if can_understand else [],
     }
 
 
@@ -196,16 +217,28 @@ def execute_actions_node(state: AgentState) -> Dict[str, Any]:
 
     if "call_billing_api" in recommended:
         logger.info("Calling billing API…")
-        billing_result = call_billing_api(state.get("billing_payload", {}))
-        if billing_result.get("success"):
+        billing_payloads = state.get("billing_payloads", [])
+        billing_results = []  # Array to store results from all payloads
+        
+        for i, payload in enumerate(billing_payloads, 1):
+            logger.info(f"Executing billing payload {i}/{len(billing_payloads)}: {payload.get('initiated_for')}")
+            result = call_billing_api(payload)
+            billing_results.append(result)
+            if result.get("success"):
+                task = result.get("billing_task", {})
+                logger.info("Billing txn %d: %s", i, task.get("transaction_id"))
+            else:
+                logger.warning("Billing API %d failed: %s", i, result.get("error"))
+        
+        # Only mark as executed if we had payloads and at least one succeeded
+        if billing_payloads and any(r.get("success") for r in billing_results):
             actions_executed.append("call_billing_api")
-            logger.info("Billing txn: %s", billing_result.get("transaction_id"))
-        else:
-            logger.warning("Billing API failed: %s", billing_result.get("error"))
+        
+        billing_result = billing_results  # Store results array
 
     return {
         "sf_case_result": sf_result,
-        "billing_result": billing_result,
+        "billing_results": billing_result,
         "actions_executed": actions_executed,
         "confidence_score": state.get("confidence_score", 0),
     }
@@ -250,17 +283,19 @@ def summarize_node(state: AgentState) -> Dict[str, Any]:
         else:
             parts.append(f"Salesforce Case: FAILED – {sf.get('error')}")
 
-    br = state.get("billing_result")
-    if br:
-        if br.get("success"):
-            task = br.get("billing_task", {})
-            parts.append(
-                f"Billing Action: {task.get('action_type')} processed "
-                f"(txn={task.get('transaction_id')}, amount={task.get('amount')} "
-                f"{task.get('currency', 'USD')}, reason={task.get('reason')})"
-            )
-        else:
-            parts.append(f"Billing Action: FAILED – {br.get('error')}")
+    billing_results = state.get("billing_results", [])
+    if billing_results:
+        for i, br in enumerate(billing_results, 1):
+            if br.get("success"):
+                task = br.get("billing_task", {})
+                parts.append(
+                    f"Billing Action {i}: {task.get('action_type')} processed "
+                    f"(txn={task.get('transaction_id')}, amount={task.get('amount')} "
+                    f"{task.get('currency', 'USD')}, reason={task.get('reason')}, "
+                    f"for={task.get('initiated_for')})"
+                )
+            else:
+                parts.append(f"Billing Action {i}: FAILED – {br.get('error')}")
 
     return {
         "final_summary": " | ".join(parts),

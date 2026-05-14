@@ -1,17 +1,32 @@
 [
   {
-    "transaction_id": "TXN-1234-E5F1F04F",
+    "transaction_id": "TXN-1234-0C7226B3",
     "account_id": "1234",
-    "change_suggested": "Customer has not received their bills. Account ID: 1234, Plan: Premium, Status: Active.",
-    "action_type": "rebill",
-    "reason": "BILL_NOT_RECEIVED",
+    "change_suggested": "Customer_1234 has not received their bills. Action initiated to send D367 for meter configuration change.",
+    "action_type": "adjustment",
+    "reason": "METER_CONFIG_CHANGE",
     "amount": 0.0,
     "currency": "USD",
-    "notes": "Customer has not received their bills. Account ID: 1234, Plan: Premium, Status: Active.",
+    "notes": "Customer_1234 has not received their bills. Action initiated to send D367 for meter configuration change.",
     "initiated_by": "intelligent-agent",
-    "initiated_for": "rebill",
-    "created_at": "2026-05-14T13:04:20.042333+00:00",
+    "initiated_for": "Send D367 to change the meter configuration",
+    "created_at": "2026-05-14T13:27:39.591242+00:00",
     "status": "processed",
-    "received_at": "2026-05-14T13:04:22.065037+00:00"
+    "received_at": "2026-05-14T13:27:41.639015+00:00"
+  },
+  {
+    "transaction_id": "TXN-1234-21EEA76D",
+    "account_id": "1234",
+    "change_suggested": "Customer_1234 has not received their bills. Action initiated to update meter configuration to match customer's tariff.",
+    "action_type": "adjustment",
+    "reason": "METER_CONFIG_UPDATE",
+    "amount": 0.0,
+    "currency": "USD",
+    "notes": "Customer_1234 has not received their bills. Action initiated to update meter configuration to match customer's tariff.",
+    "initiated_by": "intelligent-agent",
+    "initiated_for": "Update meter configuration",
+    "created_at": "2026-05-14T13:27:41.645285+00:00",
+    "status": "processed",
+    "received_at": "2026-05-14T13:27:43.680661+00:00"
   }
 ]

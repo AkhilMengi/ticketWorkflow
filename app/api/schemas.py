@@ -77,8 +77,8 @@ class IssueResponse(BaseModel):
     sf_case_result: Optional[Dict[str, Any]] = Field(
         None, description="Salesforce case creation result"
     )
-    billing_result: Optional[BillingTaskResponse] = Field(
-        None, description="Billing task creation result including full task detail"
+    billing_results: Optional[List[BillingTaskResponse]] = Field(
+        None, description="Array of billing task results (one per matching suggestion)"
     )
 
     # Summary
@@ -92,3 +92,29 @@ class AgentEvent(BaseModel):
     event: str = Field(description="Event type: node_start | node_complete | workflow_complete | error")
     node: Optional[str] = Field(None, description="Graph node name")
     data: Optional[Dict[str, Any]] = Field(None, description="Node output or error detail")
+
+
+# ── Sheet update (simple button-triggered action) ─────────────────────────────
+
+class SheetUpdateRequest(BaseModel):
+    """Request to update a single value in Excel/Sheet."""
+    account_id: str = Field(..., example="ACC-1001", description="Account identifier")
+    field_name: str = Field(..., example="status", description="Column name to update")
+    field_value: str = Field(..., example="Resolved", description="New value for the field")
+    context: Optional[str] = Field(
+        None,
+        example="Billing task completed",
+        description="Optional context about why this update is happening"
+    )
+
+
+class SheetUpdateResponse(BaseModel):
+    """Response from sheet update operation."""
+    success: bool
+    message: Optional[str] = None
+    error: Optional[str] = None
+    updated_at: Optional[str] = None
+    account_id: str
+    field_name: Optional[str] = None
+    previous_value: Optional[Any] = None
+    new_value: Optional[Any] = None

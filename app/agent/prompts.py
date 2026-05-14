@@ -120,57 +120,108 @@ Follow this logic strictly:
 
   • ELSE (confidence >= 5) - follow these steps:
 
-    1. Identify ALL suggestions that could reasonably match the customer's issue
-       (Don't just pick the single "best" match - consider multiple possibilities)
+    ⚠️  STEP 0: List ALL matching suggestions
+        Before doing anything else, identify and LIST which suggestions could reasonably match:
+        - Check if suggestion title/description relates to customer issue
+        - Write out which ones match (e.g., "Matches: suggestion_1, suggestion_4")
+        - Continue with ALL matched suggestions (don't filter to just one "best")
     
-    2. For EACH matching suggestion, read its TITLE and DESCRIPTION carefully
+    1. For EACH matched suggestion from STEP 0:
+       Read its TITLE and DESCRIPTION carefully
     
-    3. Check for SF Case keywords (ONLY these specific keywords):
+    2. Check for SF Case keywords (ONLY these specific keywords):
        "case", "ticket", "escalate", "escalation", "SF", "Salesforce"
        
-       Search ONLY in ALL matched suggestion's TITLE and DESCRIPTION text.
-       IF ANY of these keywords are found in ANY suggestion → Add "create_sf_case" to recommended_actions
-       
-       ⚠️  FALLBACK RULE: If NO SF case keywords found, then MUST add "call_billing_api"
-           to recommended_actions (as a default action when issue matches suggestions)
+       Search in ALL matched suggestions' text.
+       IF ANY of these keywords found in ANY suggestion → Add "create_sf_case" to recommended_actions
     
-    4. Check for Billing API keywords (ONLY if SF case is being created):
-       IF "create_sf_case" was added in step 3:
-         → Also check for billing keywords in suggestions (same as before)
-         → "meter", "tariff", "config", "configuration", "D367",
-           "refund", "charge", "credit", "rebill", "adjustment", "update", "change"
-         → If found → Add BOTH "create_sf_case" AND "call_billing_api"
+    3. Generate billing payloads — CRITICAL: ONE PER MATCHED SUGGESTION (with filter)
        
-       ELSE (no SF case keywords found):
-         → Fallback: "call_billing_api" is already added (from step 3)
-         → Do NOT check billing keywords - just add billing API
+       For EVERY suggestion from STEP 0's matched list:
+       → Check if suggestion TITLE or DESCRIPTION contains "check" or "confirm" (case-insensitive)
+       → IF contains "check" OR "confirm" → This is DIAGNOSTIC ONLY, do NOT generate payload
+       → ELSE → Generate ONE billing payload
+       
+       When generating each payload:
+         • "initiated_for" = suggestion's exact TITLE
+         • If suggestion includes optional "action_type" field → USE IT
+         • Else if keywords "update"/"change" present → action_type = "adjustment"
+         • Else → action_type = "adjustment" (default)
+         
+         • If suggestion includes optional "reason" field → USE IT  
+         • Else generate from keywords (e.g., "METER_CONFIG_CHANGE", "DUPLICATE_CHARGE")
+         
+         • If suggestion includes optional "notes" field → USE IT
+         • Else generate from issue context + suggestion title
+       
+       Example of using suggestion metadata:
+         Suggestion has: action_type="adjustment", reason="INCORRECT_METER_CONFIG"
+         → Use these exact values in payload
+         → Don't override with auto-detected values
     
-    5. Examples (fallback: SF not created → billing API called):
+    4. Determine recommended_actions:
+       IF any suggestion matched:
+         → Add "call_billing_api" to recommended_actions (because billing_payloads will be populated)
        
-       Customer Issue: "I haven't received my bills"
-       Matching Suggestions: 
-         - suggestion_1: "Confirm Smart Meter Status"
-         - suggestion_4: "Update meter configuration"
-       → Step 3: NO SF case keywords (no "case", "ticket", "escalate")
-       → Fallback triggered: recommended_actions = ["call_billing_api"]
+       IF SF case keywords found (from step 2):
+         → ALSO add "create_sf_case" to recommended_actions
+    
+    5. DETAILED EXAMPLE showing all steps with filtering:
        
-       Customer Issue: "Please escalate my charge dispute"
-       Matching Suggestions: Contains "escalate" keyword
-       → Step 3: Found "escalate" keyword → Add "create_sf_case"
-       → Step 4: Also check billing keywords (if customer wants refund)
-       → recommended_actions = ["create_sf_case"] or ["create_sf_case", "call_billing_api"]
+       CUSTOMER ISSUE: "I haven't received my bills"
        
-       ⚠️  CRITICAL RULE: 
-           IF suggest matches BUT no SF case keywords → Always call billing API (fallback)
-           IF SF case keywords found → May also call billing API if billing keywords present
+       ─── STEP 0: List all matching suggestions ───
+       1. "Confirm Smart Meter Status: Check for billing exceptions, reading gaps"
+          → Mentions "billing" — MATCHES ✓
+          BUT contains "Confirm" → SKIP IN STEP 3 (diagnostic only)
+       
+       2. "Check the tariff details of the customer: Check the meter configuration"  
+          → Meter config can relate to billing — MATCHES ✓
+          BUT contains "Check" → SKIP IN STEP 3 (diagnostic only)
+       
+       3. "Send D367 to change the meter configuration"
+          → Meter/D367 relates to billing config — MATCHES ✓
+          No "check" or "confirm" → INCLUDE IN STEP 3 ✓
+       
+       4. "Update meter configuration"
+          → Meter + update (action word) — MATCHES ✓
+          No "check" or "confirm" → INCLUDE IN STEP 3 ✓
+       
+       ─── STEP 2: Check SF case keywords ───
+       No "case", "ticket", "escalate" found in any suggestion
+       → recommended_actions does NOT include "create_sf_case"
+       
+       ─── STEP 3: Generate billing payloads (one per matched + not-diagnostic) ───
+       After filtering out diagnostic suggestions, generate billing_payloads array with 2 items:
+       
+       Payload 1:
+         "initiated_for": "Send D367 to change the meter configuration"
+         "action_type": "adjustment"  (has "change" → adjustment)
+       
+       Payload 2:
+         "initiated_for": "Update meter configuration"
+         "action_type": "adjustment"  (has "update" → adjustment)
+       
+       ─── STEP 4: Set recommended_actions ───
+       recommended_actions = ["call_billing_api"]  (2 payloads generated)
+       
+       RESULT:
+         billing_payloads.length = 2  (not 4, because 2 were filtered as diagnostic)
+         → Agent will execute billing API 2 times (once per non-diagnostic payload)
+       
+       ⚠️  CRITICAL FILTERING RULES:
+           • Suggestions with "check" or "confirm" in TITLE or DESCRIPTION = DIAGNOSTIC ONLY
+           • Do NOT generate billing payloads for diagnostic suggestions
+           • Only generate payloads for action-oriented suggestions (change, update, send, etc.)
+           • List STEP 0 matches AND which ones were filtered in your reasoning
 
 ━━━━━━━━━━━━━━━━━━  PAYLOAD QUALITY RULES  ━━━━━━━━━━━━━━━━━━
-  • sf_case subject  : ≤ 80 chars, specific (e.g. "Double charge – $99 – ACC-1001")
-  • sf_case priority : must match severity, not always "Medium"
-  • billing amount   : extract from issue text if mentioned; otherwise use 0.00
-  • billing reason   : short code (e.g. "DUPLICATE_CHARGE", "FAILED_PAYMENT")
-  • billing notes    : full context including account plan and issue summary
-  • billing initiated_for: what is this action for (e.g., "refund", "meter-update", "config-change")
+  • sf_case subject    : ≤ 80 chars, specific (e.g. "Double charge – $99 – ACC-1001")
+  • sf_case priority   : must match severity, not always "Medium"
+  • billing amount     : extract from issue text if mentioned; otherwise use 0.00
+  • billing reason     : short code (e.g. "DUPLICATE_CHARGE", "FAILED_PAYMENT")
+  • billing notes      : full context including account plan and issue summary
+  • billing initiated_for: MUST be exact suggestion TITLE (e.g., "Confirm Smart Meter Status")
 
 ━━━━━━━━━━━━━━━━━━  OUTPUT FORMAT  ━━━━━━━━━━━━━━━━━━━━━━━━━━
 Respond with VALID JSON ONLY. No markdown, no extra text, no explanation outside the JSON.
@@ -188,20 +239,34 @@ Respond with VALID JSON ONLY. No markdown, no extra text, no explanation outside
     "origin": "Web",
     "account_id": "{account_id}"
   }},
-  "billing_payload": {{
-    "account_id": "{account_id}",
-    "action_type": "rebill | credit | refund | adjustment",
-    "amount": 0.00,
-    "currency": "USD",
-    "reason": "<SHORT_REASON_CODE>",
-    "initiated_for": "<what this is for: refund, meter-update, config-change, etc>",
-    "notes": "<full notes with issue context>"
-  }}
+  "billing_payloads": [
+    {{
+      "account_id": "{account_id}",
+      "action_type": "rebill | credit | refund | adjustment",
+      "amount": 0.00,
+      "currency": "USD",
+      "reason": "<SHORT_REASON_CODE>",
+      "initiated_for": "<which suggestion: 'Send D367...', 'Update meter...', etc>",
+      "notes": "<full notes with issue context and which suggestion this addresses>"
+    }},
+    {{
+      "account_id": "{account_id}",
+      "action_type": "rebill | credit | refund | adjustment",
+      "amount": 0.00,
+      "currency": "USD",
+      "reason": "<SHORT_REASON_CODE>",
+      "initiated_for": "<which suggestion: 'Send D367...', 'Update meter...', etc>",
+      "notes": "<full notes with issue context and which suggestion this addresses>"
+    }}
+  ]
 }}
 
 STRICT RULES:
-  - Include "sf_case_payload"  ONLY when "create_sf_case"   is in recommended_actions.
-  - Include "billing_payload"  ONLY when "call_billing_api" is in recommended_actions.
+  - Include "sf_case_payload"    ONLY when "create_sf_case"   is in recommended_actions.
+  - Include "billing_payloads"   ONLY when "call_billing_api" is in recommended_actions.
+  - "billing_payloads" must be an ARRAY with ONE payload per matching suggestion.
+  - If multiple suggestions match → generate multiple billing payloads (one per suggestion).
+  - Each billing payload's "initiated_for" field must specify WHICH suggestion it addresses.
   - Omit payload keys entirely when the corresponding action is not selected.
   - recommended_actions must only contain: "create_sf_case", "call_billing_api", or be [].
   - Output must be parseable by Python's json.loads() — no trailing commas.
