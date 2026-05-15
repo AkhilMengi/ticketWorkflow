@@ -71,6 +71,8 @@ def _load_suggestions() -> tuple[str, Dict[str, Any]]:
                 optional_fields.append(f"reason={value['reason']}")
             if "notes" in value:
                 optional_fields.append(f"notes={value['notes'][:50]}...")
+            if "initiated_for" in value:
+                optional_fields.append(f"initiated_for={value['initiated_for']}")
             
             if optional_fields:
                 lines.append(f"    ({', '.join(optional_fields)})")

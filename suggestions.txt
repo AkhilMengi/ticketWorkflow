@@ -12,13 +12,14 @@ suggestion_3:
   action_type: "adjustment"
   reason: "INCORRECT_METER_CONFIG"
   notes: "Send D367 to customer to change meter configuration and ensure proper billing"
-
+  initiated_for: "Managed Services"
 suggestion_4:
   title: "Update meter configuration"
   description: "Update meter configuration from PAYG to 2Rate credit meter"
   action_type: "adjustment"
   reason: "METER_CONFIG_UPDATE"
   notes: "Update meter configuration to match customer's tariff plan"
+  initiated_for: "Smart Meter Services"
 
 
 

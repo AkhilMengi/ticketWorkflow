@@ -305,6 +305,8 @@ async def update_sheet_endpoint(request: SheetUpdateRequest) -> SheetUpdateRespo
             message=result.get("message", "Sheet updated successfully"),
             error=None,
             updated_at=result.get("updated_at"),
+            account_id=request.account_id,
+            field_name=request.field_name,
             previous_value=result.get("previous_value"),
             new_value=result.get("new_value"),
         )

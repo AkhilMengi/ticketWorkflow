@@ -10,18 +10,18 @@ from datetime import datetime, timezone
 
 import requests
 
-from app.config import SHEET_API_URL
+from app.config import SHEET_API_URL, SHEET_FILE_NAME
 
 logger = logging.getLogger(__name__)
 
 
 def update_sheet(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Update a value in the Excel/Sheet.
+    Update a value in the Excel/Sheet (file name: abc).
     
     payload keys:
       account_id      : which account/row to update
-      field_name      : which column to update (e.g., "status", "last_contact", "notes")
+      field_name      : which column to update (e.g., "meter_config", "status", "notes")
       field_value     : new value to set
       context         : optional context about why this update is happening
     
@@ -59,6 +59,7 @@ def update_sheet(payload: Dict[str, Any]) -> Dict[str, Any]:
         response = requests.post(
             f"{SHEET_API_URL}/api/v1/sheet/update",
             json={
+                "sheet_file_name": SHEET_FILE_NAME,
                 "account_id": account_id,
                 "field_name": field_name,
                 "field_value": field_value,

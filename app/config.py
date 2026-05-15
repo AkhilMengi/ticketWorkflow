@@ -18,5 +18,6 @@ MOCK_BILLING: bool = os.getenv("MOCK_BILLING", "true").lower() == "true"
 BILLING_API_URL: str = os.getenv("BILLING_API_URL", "http://localhost:9000")
 
 SHEET_API_URL: str = os.getenv("SHEET_API_URL", "http://localhost:9001")
+SHEET_FILE_NAME: str = os.getenv("SHEET_FILE_NAME", "abc")
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./agent.db")

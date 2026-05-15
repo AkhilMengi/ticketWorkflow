@@ -140,19 +140,47 @@ Follow this logic strictly:
        For EVERY suggestion from STEP 0's matched list:
        → Check if suggestion TITLE or DESCRIPTION contains "check" or "confirm" (case-insensitive)
        → IF contains "check" OR "confirm" → This is DIAGNOSTIC ONLY, do NOT generate payload
-       → ELSE → Generate ONE billing payload
+       → ELSE → Generate ONE billing payload with REFINED metadata
        
        When generating each payload:
-         • "initiated_for" = suggestion's exact TITLE
-         • If suggestion includes optional "action_type" field → USE IT
-         • Else if keywords "update"/"change" present → action_type = "adjustment"
-         • Else → action_type = "adjustment" (default)
+         STEP 3A: Extract from Suggestion
+           Look for OPTIONAL METADATA in parentheses under each suggestion:
+             Example: "(action_type=adjustment, reason=INCORRECT_METER_CONFIG, notes=...)"
+           
+           IF these fields exist → EXTRACT THEM:
+             • Extract "action_type" value
+             • Extract "reason" value
+             • Extract "notes" value
+             • Extract "initiated_for" value (if present)
+           
+           IF these fields DON'T exist → use defaults from issue analysis
          
-         • If suggestion includes optional "reason" field → USE IT  
-         • Else generate from keywords (e.g., "METER_CONFIG_CHANGE", "DUPLICATE_CHARGE")
+         STEP 3B: Refine Professionally (polish grammar, tone, clarity)
+           • action_type: Keep as-is (enum: "refund", "credit", "rebill", "adjustment")
+           • reason: Make more professional/formal wording, keep as SHORT CODE
+           • notes: Refine for clarity and professionalism, add context from customer issue
+           • initiated_for: Use suggestion TITLE but polish wording (better grammar, capitalization)
          
-         • If suggestion includes optional "notes" field → USE IT
-         • Else generate from issue context + suggestion title
+         Example of refinement:
+           Original from suggestion:
+             action_type: "adjustment"
+             reason: "INCORRECT_METER_CONFIG"
+             notes: "Send D367 to customer to change meter configuration and ensure proper billing"
+             initiated_for: "Send D367 to change the meter configuration"
+           
+           Refined output:
+             action_type: "adjustment"  (no change - already correct)
+             reason: "INCORRECT_METER_CONFIG"  (no change - already correct)
+             notes: "Meter D367 configuration adjustment required for accurate billing. 
+                     Customer reported billing discrepancies attributed to outdated 
+                     meter configuration. Update to current standards to resolve."
+             initiated_for: "Meter Configuration Update via D367 Device Change"
+       
+       ⚠️  IMPORTANT: 
+           • Do NOT change action_type or reason codes - they are system enums
+           • Only refine notes and initiated_for for professionalism
+           • Keep reason codes SHORT and UPPERCASE
+           • Make notes concise but complete (2-3 sentences max)
        
        Example of using suggestion metadata:
          Suggestion has: action_type="adjustment", reason="INCORRECT_METER_CONFIG"
@@ -194,13 +222,21 @@ Follow this logic strictly:
        ─── STEP 3: Generate billing payloads (one per matched + not-diagnostic) ───
        After filtering out diagnostic suggestions, generate billing_payloads array with 2 items:
        
-       Payload 1:
-         "initiated_for": "Send D367 to change the meter configuration"
-         "action_type": "adjustment"  (has "change" → adjustment)
+       Payload 1 (from "Send D367 to change the meter configuration"):
+         "initiated_for": "D367 Meter Configuration Update for Billing Accuracy"  (refined)
+         "action_type": "adjustment"  (from suggestion metadata)
+         "reason": "INCORRECT_METER_CONFIG"  (from suggestion metadata)
+         "notes": "Customer reported billing discrepancies. Meter configuration update 
+                   via D367 device required to align with current service plan and 
+                   ensure accurate future billing cycles."  (refined)
        
-       Payload 2:
-         "initiated_for": "Update meter configuration"
-         "action_type": "adjustment"  (has "update" → adjustment)
+       Payload 2 (from "Update meter configuration"):
+         "initiated_for": "Smart Meter Configuration Transition (PAYG to 2-Rate)"  (refined)
+         "action_type": "adjustment"  (from suggestion metadata)
+         "reason": "METER_CONFIG_UPDATE"  (from suggestion metadata)
+         "notes": "Update meter configuration from PAYG to 2-Rate credit meter to match 
+                   customer's tariff plan. This ensures pricing accuracy and proper 
+                   billing category alignment."  (refined)
        
        ─── STEP 4: Set recommended_actions ───
        recommended_actions = ["call_billing_api"]  (2 payloads generated)
